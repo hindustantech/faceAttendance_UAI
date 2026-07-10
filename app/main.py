@@ -8,7 +8,8 @@ import time
 from datetime import datetime
 
 from app.config import settings
-from app.routes import training, recognition, health
+from app.routes import training, recognition, detection, health
+from app.services.face_detection import FaceDetectionService
 from app.services.face_training import FaceTrainingService
 from app.services.face_recognition import FaceRecognitionService
 from app.services.anti_spoofing import AntiSpoofingService
@@ -45,11 +46,16 @@ async def lifespan(app: FastAPI):
         face_training_service = FaceTrainingService()
         await face_training_service.initialize()
         logger.info("✓ Face training service initialized")
-        
+
         # Initialize Face Recognition Service
         face_recognition_service = FaceRecognitionService()
         await face_recognition_service.initialize()
         logger.info("✓ Face recognition service initialized")
+        
+        # Initialize Face Detection Service
+        face_detection_service = FaceDetectionService()
+        await face_detection_service.initialize()
+        logger.info("✓ Face detection service initialized")
         
         logger.info("=" * 50)
         logger.info(f"{settings.APP_NAME} is ready to serve requests")
@@ -121,7 +127,12 @@ app.include_router(
     prefix="/health",
     tags=["Health Check"]
 )
-
+app.include_router(
+    detection.router,
+    prefix="/api/v1/face-detection",
+    tags=["Face Detection"]
+)
+ 
 app.include_router(
     training.router,
     prefix="/api/v1/face-training",
