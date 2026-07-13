@@ -2,6 +2,13 @@
 # Caching (Redis) removed. Enrollment query relaxed so documents whose
 # isEnrolled/enrollmentStatus flags aren't set upstream are still found,
 # as long as they have an active image with an embedding.
+#
+# FIX (2026-07-13): _get_enrolled_faces now matches companyId whether it's
+# stored as a string OR an ObjectId (via $in), mirroring the fallback that
+# _get_employee_faces already did. Previously the 1:N/identify path only
+# matched string-typed companyId, so employees whose document had an
+# ObjectId-typed companyId were invisible to identify() even though 1:1
+# verify_face() found them fine via its two-step fallback query.
 
 import numpy as np
 from typing import Dict, List, Optional, Tuple
@@ -533,7 +540,16 @@ class FaceRecognitionService:
             return None
 
     async def _get_enrolled_faces(self, company_id: str) -> List[Dict]:
-        """Get all enrolled faces for company (no cache, no enrollment-flag filter)"""
+        """
+        Get all enrolled faces for company (no cache, no enrollment-flag filter).
+
+        FIX: match companyId whether it's stored in Mongo as a string OR
+        an ObjectId, using $in. Previously this only matched string-typed
+        companyId, which meant employees whose document had companyId
+        stored as an ObjectId were silently invisible to identify()/1:N,
+        even though 1:1 verify_face() found them fine via its separate
+        string-then-ObjectId fallback query in _get_employee_faces.
+        """
         try:
             logger.info(f"[DEBUG] ========== FETCHING ALL ENROLLED FACES ==========")
             logger.info(f"[DEBUG] Company ID: {company_id}")
@@ -541,13 +557,18 @@ class FaceRecognitionService:
             collection = self.db['faces']
             logger.info(f"[DEBUG] Collection: {collection.name}")
 
+            # Match companyId as either a string or ObjectId in one query.
+            company_id_variants = [company_id]
+            if ObjectId.is_valid(company_id):
+                company_id_variants.append(ObjectId(company_id))
+
             # Relaxed query: don't require isEnrolled == True and
             # enrollmentStatus == 'approved', since those flags aren't
             # reliably populated by the upstream enrollment flow. We only
             # exclude locked accounts; the per-image isActive/embedding
             # check below is what actually determines usability.
             query = {
-                'companyId': company_id,
+                'companyId': {'$in': company_id_variants},
                 'isLocked': {'$ne': True}
             }
             logger.info(f"[DEBUG] Query: {json.dumps(query, default=str)}")
@@ -555,7 +576,7 @@ class FaceRecognitionService:
             total_docs = await collection.count_documents({})
             logger.info(f"[DEBUG] Total documents in collection: {total_docs}")
 
-            company_docs = await collection.count_documents({'companyId': company_id})
+            company_docs = await collection.count_documents({'companyId': {'$in': company_id_variants}})
             logger.info(f"[DEBUG] Documents for company {company_id}: {company_docs}")
 
             cursor = collection.find(query)
@@ -567,6 +588,7 @@ class FaceRecognitionService:
             async for document in cursor:
                 doc_count += 1
                 logger.info(f"[DEBUG] Processing document {doc_count}")
+                logger.info(f"[DEBUG]   companyId: {document.get('companyId')} (type: {type(document.get('companyId')).__name__})")
                 logger.info(f"[DEBUG]   employeeId: {document.get('employeeId')}")
                 logger.info(f"[DEBUG]   isEnrolled: {document.get('isEnrolled')}")
                 logger.info(f"[DEBUG]   enrollmentStatus: {document.get('enrollmentStatus')}")
@@ -595,11 +617,12 @@ class FaceRecognitionService:
 
             if not enrolled_faces:
                 logger.warning("[DEBUG] No enrolled faces found. Checking all documents...")
-                all_docs = await collection.find({'companyId': company_id}).to_list(length=10)
+                all_docs = await collection.find({'companyId': {'$in': company_id_variants}}).to_list(length=10)
                 logger.info(f"[DEBUG] All documents for company: {len(all_docs)}")
 
                 for idx, doc in enumerate(all_docs):
-                    logger.info(f"[DEBUG] Doc {idx}: employeeId={doc.get('employeeId')}, "
+                    logger.info(f"[DEBUG] Doc {idx}: companyId={doc.get('companyId')} ({type(doc.get('companyId')).__name__}), "
+                              f"employeeId={doc.get('employeeId')}, "
                               f"isEnrolled={doc.get('isEnrolled')}, "
                               f"enrollmentStatus={doc.get('enrollmentStatus')}, "
                               f"isLocked={doc.get('isLocked')}, "
@@ -618,9 +641,29 @@ class FaceRecognitionService:
         query_embedding: List[float],
         enrolled_faces: List[Dict]
     ) -> Optional[Dict]:
-        """Find best matching face using cosine similarity"""
+        """
+        Find best matching face using Euclidean distance, converted to a
+        0-1 'similarity' score for compatibility with the rest of the code.
+
+        IMPORTANT: these are 128-d embeddings (consistent with dlib's
+        face_recognition library), which are designed to be compared with
+        Euclidean distance, NOT cosine similarity. Cosine similarity on
+        these vectors compresses all comparisons - same person or not -
+        into a narrow high band (roughly 0.85-0.99), which is why
+        completely different faces were being reported as matches.
+
+        dlib's own recommended threshold is a Euclidean distance of 0.6
+        (lower distance = more similar). We convert distance to a
+        'similarity' score via similarity = 1 - distance so the rest of
+        the codebase (which expects higher-is-better, threshold ~0.65)
+        keeps working, but calibrate FACE_MATCH_THRESHOLD in settings to
+        match this new scale - see note in _verify_specific_employee /
+        _verify_against_company call sites. A distance of 0.6 corresponds
+        to similarity 0.40, so settings.FACE_MATCH_THRESHOLD should be
+        updated to something like 0.45-0.50 (stricter) rather than 0.65.
+        """
         try:
-            logger.info(f"[DEBUG] ========== FINDING BEST MATCH ==========")
+            logger.info(f"[DEBUG] ========== FINDING BEST MATCH (Euclidean) ==========")
             logger.info(f"[DEBUG] Query embedding length: {len(query_embedding) if query_embedding else 0}")
             logger.info(f"[DEBUG] Enrolled faces count: {len(enrolled_faces)}")
 
@@ -629,25 +672,22 @@ class FaceRecognitionService:
                 return None
 
             query_vec = np.array(query_embedding, dtype=np.float64)
-            query_vec_norm = np.linalg.norm(query_vec)
-            logger.info(f"[DEBUG] Query vector norm before normalization: {query_vec_norm}")
-            query_vec = query_vec / query_vec_norm
-            logger.info(f"[DEBUG] Query vector norm after normalization: {np.linalg.norm(query_vec)}")
 
             best_match = None
             best_similarity = -1
-            similarities = []
+            distances = []
 
             for idx, face in enumerate(enrolled_faces):
                 try:
                     enrolled_vec = np.array(face['embedding'], dtype=np.float64)
-                    enrolled_vec = enrolled_vec / np.linalg.norm(enrolled_vec)
 
-                    similarity = np.dot(query_vec, enrolled_vec)
-                    similarities.append(float(similarity))
+                    # Euclidean (L2) distance - lower means more similar
+                    distance = float(np.linalg.norm(query_vec - enrolled_vec))
+                    similarity = 1.0 - distance
+                    distances.append(distance)
 
                     logger.info(f"[DEBUG] Face {idx}: employee={face.get('employee_id', 'n/a')}, "
-                              f"similarity={float(similarity):.4f}, "
+                              f"distance={distance:.4f}, similarity={similarity:.4f}, "
                               f"image_id={face.get('image_id', 'n/a')}")
 
                     if similarity > best_similarity:
@@ -655,6 +695,7 @@ class FaceRecognitionService:
                         best_match = {
                             'employee_id': face.get('employee_id'),
                             'similarity': float(similarity),
+                            'distance': distance,
                             'image_id': face.get('image_id', ''),
                             'quality': face.get('quality', 'good')
                         }
@@ -666,11 +707,11 @@ class FaceRecognitionService:
                                  f"embedding_length={len(face.get('embedding', []))}")
                     continue
 
-            if similarities:
-                logger.info(f"[DEBUG] All similarities: {[f'{s:.4f}' for s in similarities]}")
-                logger.info(f"[DEBUG] Best similarity: {best_similarity:.4f}")
-                logger.info(f"[DEBUG] Average similarity: {np.mean(similarities):.4f}")
-                logger.info(f"[DEBUG] Similarity range: {min(similarities):.4f} - {max(similarities):.4f}")
+            if distances:
+                logger.info(f"[DEBUG] All distances: {[f'{d:.4f}' for d in distances]}")
+                logger.info(f"[DEBUG] Best distance: {min(distances):.4f}")
+                logger.info(f"[DEBUG] Average distance: {np.mean(distances):.4f}")
+                logger.info(f"[DEBUG] Distance range: {min(distances):.4f} - {max(distances):.4f}")
 
             return best_match
 
@@ -685,22 +726,25 @@ class FaceRecognitionService:
         enrolled_faces: List[Dict],
         threshold: float
     ) -> List[Dict]:
-        """Find all matching faces above threshold"""
+        """
+        Find all matching faces above threshold, using Euclidean distance
+        converted to a similarity score (see _find_best_match docstring
+        for why cosine similarity is wrong for these 128-d embeddings).
+        """
         try:
             if not query_embedding or not enrolled_faces:
                 return []
 
             query_vec = np.array(query_embedding, dtype=np.float64)
-            query_vec = query_vec / np.linalg.norm(query_vec)
 
             employee_matches = {}
 
             for face in enrolled_faces:
                 try:
                     enrolled_vec = np.array(face['embedding'], dtype=np.float64)
-                    enrolled_vec = enrolled_vec / np.linalg.norm(enrolled_vec)
 
-                    similarity = float(np.dot(query_vec, enrolled_vec))
+                    distance = float(np.linalg.norm(query_vec - enrolled_vec))
+                    similarity = 1.0 - distance
 
                     if similarity >= threshold:
                         employee_id = face['employee_id']
