@@ -9,6 +9,14 @@
 # matched string-typed companyId, so employees whose document had an
 # ObjectId-typed companyId were invisible to identify() even though 1:1
 # verify_face() found them fine via its two-step fallback query.
+#
+# FIX (2026-07-13): Both _get_employee_faces and _get_enrolled_faces now
+# use $elemMatch on the images array to ensure only documents with at
+# least one active image that has an embedding are returned. Previously,
+# _get_employee_faces could return a verification-only document (created
+# by _log_verification upsert) that had no images/embeddings, causing a
+# false "No valid face embeddings found" error even though the actual
+# enrollment document existed separately in the collection.
 
 import numpy as np
 from typing import Dict, List, Optional, Tuple
@@ -464,7 +472,14 @@ class FaceRecognitionService:
             raise
 
     async def _get_employee_faces(self, company_id: str, employee_id: str) -> Optional[Dict]:
-        """Get specific employee's enrolled faces (no cache, no enrollment-flag filter)"""
+        """
+        Get specific employee's enrolled faces (no cache, no enrollment-flag filter).
+        
+        FIX (2026-07-13): Added $elemMatch on images array to ensure we only
+        return documents that have at least one active image with an embedding.
+        This prevents matching a verification-only document that was created
+        by _log_verification's upsert, which has no images/embeddings.
+        """
         try:
             logger.info(f"[DEBUG] ========== FETCHING EMPLOYEE FACES ==========")
             logger.info(f"[DEBUG] Company ID: {company_id} (type: {type(company_id)})")
@@ -476,53 +491,89 @@ class FaceRecognitionService:
             logger.info(f"[DEBUG] MongoDB collection: {collection.name}")
             logger.info(f"[DEBUG] MongoDB database: {collection.database.name}")
 
-            # Query with string IDs first. NOTE: we deliberately do NOT
-            # require isEnrolled/enrollmentStatus here, since those flags
-            # aren't reliably set by the upstream enrollment flow. We only
-            # care whether the document has a usable, active embedding.
-            query_string = {
-                'companyId': company_id,
-                'employeeId': employee_id
-            }
-            logger.info(f"[DEBUG] Query (string): {json.dumps(query_string, default=str)}")
+            # Build companyId variants for flexible matching
+            company_id_variants = [company_id]
+            if ObjectId.is_valid(company_id):
+                company_id_variants.append(ObjectId(company_id))
+                
+            employee_id_variants = [employee_id]
+            if ObjectId.is_valid(employee_id):
+                employee_id_variants.append(ObjectId(employee_id))
 
-            document = await collection.find_one(query_string)
-            logger.info(f"[DEBUG] Query result (string ID): {'FOUND' if document else 'NOT FOUND'}")
-
-            if not document:
-                try:
-                    query_objectid = {
-                        'companyId': ObjectId(company_id) if ObjectId.is_valid(company_id) else company_id,
-                        'employeeId': ObjectId(employee_id) if ObjectId.is_valid(employee_id) else employee_id,
+            # CRITICAL FIX: Query must ensure document has images array with 
+            # at least one active embedding. This prevents matching the 
+            # verification-only document that has no images.
+            query = {
+                'companyId': {'$in': company_id_variants},
+                'employeeId': {'$in': employee_id_variants},
+                'images': {
+                    '$elemMatch': {
+                        'isActive': True,
+                        'embedding': {'$exists': True, '$ne': None}
                     }
-                    logger.info(f"[DEBUG] Query (ObjectId): {json.dumps(query_objectid, default=str)}")
+                }
+            }
+            logger.info(f"[DEBUG] Query (with $elemMatch): {json.dumps(query, default=str)}")
 
-                    document = await collection.find_one(query_objectid)
-                    logger.info(f"[DEBUG] Query result (ObjectId): {'FOUND' if document else 'NOT FOUND'}")
-                except Exception as e:
-                    logger.error(f"[DEBUG] ObjectId query failed: {str(e)}")
+            document = await collection.find_one(query)
+            logger.info(f"[DEBUG] Query result: {'FOUND' if document else 'NOT FOUND'}")
 
             if not document:
-                logger.warning(f"[DEBUG] No document found. Listing sample documents in collection...")
-                all_docs = await collection.find({}).to_list(length=5)
-                logger.info(f"[DEBUG] Total documents in collection: {await collection.count_documents({})}")
+                # Try with string IDs only as fallback
+                query_string = {
+                    'companyId': company_id,
+                    'employeeId': employee_id,
+                    'images': {
+                        '$elemMatch': {
+                            'isActive': True,
+                            'embedding': {'$exists': True, '$ne': None}
+                        }
+                    }
+                }
+                logger.info(f"[DEBUG] Fallback query (string only): {json.dumps(query_string, default=str)}")
+                
+                document = await collection.find_one(query_string)
+                logger.info(f"[DEBUG] Fallback query result: {'FOUND' if document else 'NOT FOUND'}")
 
+            if not document:
+                logger.warning(f"[DEBUG] No document with embeddings found. Listing all documents for employee...")
+                # Debug: show all documents for this employee (including verification-only ones)
+                all_docs = await collection.find({
+                    'employeeId': {'$in': employee_id_variants}
+                }).to_list(length=10)
+                
+                logger.info(f"[DEBUG] Total documents for employee: {len(all_docs)}")
                 for idx, doc in enumerate(all_docs):
+                    num_images = len(doc.get('images', []))
+                    has_active_embeddings = any(
+                        img.get('isActive') and img.get('embedding') 
+                        for img in doc.get('images', [])
+                    )
                     logger.info(f"[DEBUG] Document {idx}:")
-                    logger.info(f"[DEBUG]   companyId: {doc.get('companyId')}")
-                    logger.info(f"[DEBUG]   employeeId: {doc.get('employeeId')}")
+                    logger.info(f"[DEBUG]   _id: {doc.get('_id')}")
+                    logger.info(f"[DEBUG]   companyId: {doc.get('companyId')} (type: {type(doc.get('companyId')).__name__})")
                     logger.info(f"[DEBUG]   isEnrolled: {doc.get('isEnrolled')}")
                     logger.info(f"[DEBUG]   enrollmentStatus: {doc.get('enrollmentStatus')}")
-
+                    logger.info(f"[DEBUG]   numImages: {num_images}")
+                    logger.info(f"[DEBUG]   hasActiveEmbeddings: {has_active_embeddings}")
+                    logger.info(f"[DEBUG]   keys: {list(doc.keys())}")
+                
                 return None
 
-            if document.get('isEnrolled') is not True or document.get('enrollmentStatus') != 'approved':
-                logger.warning(
-                    "[DEBUG] Document found but enrollment flags are not set "
-                    f"(isEnrolled={document.get('isEnrolled')}, "
-                    f"enrollmentStatus={document.get('enrollmentStatus')}). "
-                    "Proceeding anyway since active embeddings are what matter for matching."
-                )
+            # Log what we found
+            logger.info(f"[DEBUG] Found document with embeddings. Serializing...")
+            logger.info(f"[DEBUG] Document keys: {list(document.keys())}")
+            logger.info(f"[DEBUG] isEnrolled: {document.get('isEnrolled')}")
+            logger.info(f"[DEBUG] enrollmentStatus: {document.get('enrollmentStatus')}")
+            logger.info(f"[DEBUG] Number of images: {len(document.get('images', []))}")
+            
+            # Log image details
+            for idx, image in enumerate(document.get('images', [])):
+                logger.info(f"[DEBUG] Image {idx}: isActive={image.get('isActive')}, "
+                          f"hasEmbedding={image.get('embedding') is not None}, "
+                          f"quality={image.get('quality')}")
+                if image.get('embedding'):
+                    logger.info(f"[DEBUG] Image {idx} embedding length: {len(image['embedding'])}")
 
             logger.info("[DEBUG] Serializing document...")
             result = self._serialize_document(document)
@@ -531,7 +582,7 @@ class FaceRecognitionService:
             logger.info(f"[DEBUG] Is enrolled: {result.get('isEnrolled')}")
             logger.info(f"[DEBUG] Number of images: {len(result.get('images', []))}")
 
-            logger.info(f"[DEBUG] Successfully retrieved employee faces")
+            logger.info(f"[DEBUG] Successfully retrieved employee faces with embeddings")
             return result
 
         except Exception as e:
@@ -549,6 +600,10 @@ class FaceRecognitionService:
         stored as an ObjectId were silently invisible to identify()/1:N,
         even though 1:1 verify_face() found them fine via its separate
         string-then-ObjectId fallback query in _get_employee_faces.
+        
+        FIX (2026-07-13): Added $elemMatch on images array to ensure we only
+        return documents that have at least one active image with an embedding.
+        This prevents including verification-only documents in the results.
         """
         try:
             logger.info(f"[DEBUG] ========== FETCHING ALL ENROLLED FACES ==========")
@@ -562,14 +617,18 @@ class FaceRecognitionService:
             if ObjectId.is_valid(company_id):
                 company_id_variants.append(ObjectId(company_id))
 
-            # Relaxed query: don't require isEnrolled == True and
-            # enrollmentStatus == 'approved', since those flags aren't
-            # reliably populated by the upstream enrollment flow. We only
-            # exclude locked accounts; the per-image isActive/embedding
-            # check below is what actually determines usability.
+            # CRITICAL FIX: Query must ensure documents have images array with
+            # at least one active embedding. This prevents including
+            # verification-only documents that have no images.
             query = {
                 'companyId': {'$in': company_id_variants},
-                'isLocked': {'$ne': True}
+                'isLocked': {'$ne': True},
+                'images': {
+                    '$elemMatch': {
+                        'isActive': True,
+                        'embedding': {'$exists': True, '$ne': None}
+                    }
+                }
             }
             logger.info(f"[DEBUG] Query: {json.dumps(query, default=str)}")
 
@@ -588,6 +647,7 @@ class FaceRecognitionService:
             async for document in cursor:
                 doc_count += 1
                 logger.info(f"[DEBUG] Processing document {doc_count}")
+                logger.info(f"[DEBUG]   _id: {document.get('_id')}")
                 logger.info(f"[DEBUG]   companyId: {document.get('companyId')} (type: {type(document.get('companyId')).__name__})")
                 logger.info(f"[DEBUG]   employeeId: {document.get('employeeId')}")
                 logger.info(f"[DEBUG]   isEnrolled: {document.get('isEnrolled')}")
@@ -621,12 +681,19 @@ class FaceRecognitionService:
                 logger.info(f"[DEBUG] All documents for company: {len(all_docs)}")
 
                 for idx, doc in enumerate(all_docs):
-                    logger.info(f"[DEBUG] Doc {idx}: companyId={doc.get('companyId')} ({type(doc.get('companyId')).__name__}), "
+                    num_images = len(doc.get('images', []))
+                    has_active_embeddings = any(
+                        img.get('isActive') and img.get('embedding') 
+                        for img in doc.get('images', [])
+                    )
+                    logger.info(f"[DEBUG] Doc {idx}: _id={doc.get('_id')}, "
+                              f"companyId={doc.get('companyId')} ({type(doc.get('companyId')).__name__}), "
                               f"employeeId={doc.get('employeeId')}, "
                               f"isEnrolled={doc.get('isEnrolled')}, "
                               f"enrollmentStatus={doc.get('enrollmentStatus')}, "
                               f"isLocked={doc.get('isLocked')}, "
-                              f"numImages={len(doc.get('images', []))}")
+                              f"numImages={num_images}, "
+                              f"hasActiveEmbeddings={has_active_embeddings}")
 
             logger.info(f"[DEBUG] Returning {len(enrolled_faces)} enrolled faces")
             return enrolled_faces
