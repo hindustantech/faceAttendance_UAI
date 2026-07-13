@@ -347,7 +347,7 @@ class FaceDetectionService:
     ) -> Optional[Dict]:
         """Get employee face info from database"""
         try:
-            if not self.db:
+            if self.db is None:
                 return None
             
             # Try cache first
@@ -387,7 +387,7 @@ class FaceDetectionService:
     async def _get_company_detection_info(self, company_id: str) -> Dict:
         """Get company-specific information for detection context"""
         try:
-            if not self.db:
+            if self.db is None:
                 return {'company_id': company_id}
             
             # Try cache
@@ -461,7 +461,7 @@ class FaceDetectionService:
     ) -> Dict:
         """Get employee-specific detection information"""
         try:
-            if not self.db:
+            if self.db is None:
                 return {'employee_id': employee_id}
             
             collection = self.db['faces']
@@ -501,7 +501,7 @@ class FaceDetectionService:
     ):
         """Log detection event"""
         try:
-            if not self.db:
+            if self.db is None:
                 return
             
             collection = self.db['detection_logs']
@@ -763,7 +763,7 @@ class FaceDetectionService:
     async def _get_employee_image_count(self, company_id: str, employee_id: str) -> int:
         """Get count of images for an employee"""
         try:
-            if not self.db:
+            if self.db is None:
                 return 0
             
             collection = self.db['faces']
