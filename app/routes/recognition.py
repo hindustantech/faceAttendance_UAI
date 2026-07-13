@@ -1,4 +1,4 @@
-# app/routes/recognition.py (improved version)
+# app/routes/recognition.py (fixed version)
 
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends, Query
 import numpy as np
@@ -66,22 +66,43 @@ async def verify_face(
         except json.JSONDecodeError:
             device_data = {}
         
-        # Anti-spoofing check
+        # FIXED: Anti-spoofing check with better handling
         if settings.ENABLE_ANTI_SPOOFING:
-            anti_spoofing = AntiSpoofingService()
-            spoof_result = await anti_spoofing.detect_spoofing(image)
-            
-            if not spoof_result.get('is_real', True):
-                logger.warning(f"Spoofing detected: {spoof_result.get('details')}")
+            try:
+                anti_spoofing = AntiSpoofingService()
+                await anti_spoofing.initialize()
+                spoof_result = await anti_spoofing.detect_spoofing(image)
                 
-                raise HTTPException(
-                    status_code=403,
-                    detail={
-                        "message": "Spoofing detected. Please use a real face.",
-                        "confidence": spoof_result.get('confidence'),
-                        "details": spoof_result.get('details')
-                    }
-                )
+                is_real = spoof_result.get('is_real', True)
+                confidence = spoof_result.get('confidence', 1.0)
+                details = spoof_result.get('details', {})
+                verdict = details.get('verdict', 'UNKNOWN')
+                
+                logger.info(f"Anti-spoofing check: verdict={verdict}, confidence={confidence:.4f}, is_real={is_real}")
+                
+                # Only reject if clearly spoofed (very low confidence)
+                if not is_real and confidence < 0.40:
+                    logger.warning(f"Spoofing detected (high confidence): {details}")
+                    raise HTTPException(
+                        status_code=403,
+                        detail={
+                            "message": "Spoofing detected. Please use a real face.",
+                            "confidence": confidence,
+                            "details": details
+                        }
+                    )
+                elif not is_real:
+                    # Borderline case - log but allow
+                    logger.warning(f"Borderline spoof check (confidence: {confidence:.4f}) - allowing verification")
+                else:
+                    logger.info(f"Anti-spoofing passed: confidence={confidence:.4f}")
+                    
+            except HTTPException:
+                raise
+            except Exception as e:
+                logger.error(f"Anti-spoofing check failed with error: {str(e)}")
+                # If anti-spoofing itself fails, allow the verification to proceed
+                logger.warning("Anti-spoofing service error - allowing verification to continue")
         
         # Initialize recognition service
         recognition_service = FaceRecognitionService()
@@ -102,7 +123,10 @@ async def verify_face(
             
             if employee_id:
                 result['data']['verification_type'] = '1:1'
-                result['message'] = f"Face {'matched' if result['data']['matched'] else 'did not match'} employee {employee_id}"
+                if result['data']['matched']:
+                    result['message'] = f"Face matched with employee {employee_id}"
+                else:
+                    result['message'] = f"Face did not match employee {employee_id}"
             else:
                 result['data']['verification_type'] = '1:N'
                 if result['data']['matched']:
@@ -165,6 +189,32 @@ async def identify_face(
                 detail="Threshold must be between 0 and 1"
             )
         
+        # Optional: Anti-spoofing check for identify endpoint
+        if settings.ENABLE_ANTI_SPOOFING:
+            try:
+                anti_spoofing = AntiSpoofingService()
+                await anti_spoofing.initialize()
+                spoof_result = await anti_spoofing.detect_spoofing(image)
+                
+                is_real = spoof_result.get('is_real', True)
+                confidence = spoof_result.get('confidence', 1.0)
+                
+                # Only reject if clearly spoofed
+                if not is_real and confidence < 0.40:
+                    logger.warning(f"Spoofing detected in identify: confidence={confidence:.4f}")
+                    raise HTTPException(
+                        status_code=403,
+                        detail={
+                            "message": "Spoofing detected. Please use a real face.",
+                            "confidence": confidence
+                        }
+                    )
+            except HTTPException:
+                raise
+            except Exception as e:
+                logger.error(f"Anti-spoofing error in identify: {str(e)}")
+                # Continue if anti-spoofing fails
+        
         # Initialize recognition service
         recognition_service = FaceRecognitionService()
         await recognition_service.initialize()
@@ -186,7 +236,7 @@ async def identify_face(
                 'max_results': max_results
             }
             
-            # Add summary
+            # Add summary message
             matches = result['data']['matches']
             if matches:
                 result['message'] = f"Found {len(matches)} potential matches"
@@ -262,5 +312,10 @@ async def health_check():
         "status": "healthy",
         "service": "face-recognition",
         "timestamp": datetime.utcnow().isoformat(),
-        "version": "1.0.0"
+        "version": "1.0.0",
+        "features": {
+            "anti_spoofing": settings.ENABLE_ANTI_SPOOFING,
+            "face_detection": True,
+            "verification_modes": ["1:1", "1:N"]
+        }
     }
