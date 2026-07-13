@@ -2,13 +2,6 @@
 # Caching (Redis) removed. Enrollment query relaxed so documents whose
 # isEnrolled/enrollmentStatus flags aren't set upstream are still found,
 # as long as they have an active image with an embedding.
-#
-# FIX (2026-07-13): _get_enrolled_faces now matches companyId whether it's
-# stored as a string OR an ObjectId (via $in), mirroring the fallback that
-# _get_employee_faces already did. Previously the 1:N/identify path only
-# matched string-typed companyId, so employees whose document had an
-# ObjectId-typed companyId were invisible to identify() even though 1:1
-# verify_face() found them fine via its two-step fallback query.
 
 import numpy as np
 from typing import Dict, List, Optional, Tuple
@@ -539,103 +532,7 @@ class FaceRecognitionService:
             logger.error(f"[DEBUG] Full traceback: {traceback.format_exc()}")
             return None
 
-    async def _get_enrolled_faces(self, company_id: str) -> List[Dict]:
-        """
-        Get all enrolled faces for company (no cache, no enrollment-flag filter).
-
-        FIX: match companyId whether it's stored in Mongo as a string OR
-        an ObjectId, using $in. Previously this only matched string-typed
-        companyId, which meant employees whose document had companyId
-        stored as an ObjectId were silently invisible to identify()/1:N,
-        even though 1:1 verify_face() found them fine via its separate
-        string-then-ObjectId fallback query in _get_employee_faces.
-        """
-        try:
-            logger.info(f"[DEBUG] ========== FETCHING ALL ENROLLED FACES ==========")
-            logger.info(f"[DEBUG] Company ID: {company_id}")
-
-            collection = self.db['faces']
-            logger.info(f"[DEBUG] Collection: {collection.name}")
-
-            # Match companyId as either a string or ObjectId in one query.
-            company_id_variants = [company_id]
-            if ObjectId.is_valid(company_id):
-                company_id_variants.append(ObjectId(company_id))
-
-            # Relaxed query: don't require isEnrolled == True and
-            # enrollmentStatus == 'approved', since those flags aren't
-            # reliably populated by the upstream enrollment flow. We only
-            # exclude locked accounts; the per-image isActive/embedding
-            # check below is what actually determines usability.
-            query = {
-                'companyId': {'$in': company_id_variants},
-                'isLocked': {'$ne': True}
-            }
-            logger.info(f"[DEBUG] Query: {json.dumps(query, default=str)}")
-
-            total_docs = await collection.count_documents({})
-            logger.info(f"[DEBUG] Total documents in collection: {total_docs}")
-
-            company_docs = await collection.count_documents({'companyId': {'$in': company_id_variants}})
-            logger.info(f"[DEBUG] Documents for company {company_id}: {company_docs}")
-
-            cursor = collection.find(query)
-            logger.info(f"[DEBUG] Cursor created")
-
-            enrolled_faces = []
-            doc_count = 0
-
-            async for document in cursor:
-                doc_count += 1
-                logger.info(f"[DEBUG] Processing document {doc_count}")
-                logger.info(f"[DEBUG]   companyId: {document.get('companyId')} (type: {type(document.get('companyId')).__name__})")
-                logger.info(f"[DEBUG]   employeeId: {document.get('employeeId')}")
-                logger.info(f"[DEBUG]   isEnrolled: {document.get('isEnrolled')}")
-                logger.info(f"[DEBUG]   enrollmentStatus: {document.get('enrollmentStatus')}")
-                logger.info(f"[DEBUG]   Number of images: {len(document.get('images', []))}")
-
-                employee_id = str(document['employeeId'])
-
-                for idx, image in enumerate(document.get('images', [])):
-                    logger.info(f"[DEBUG]   Image {idx}:")
-                    logger.info(f"[DEBUG]     isActive: {image.get('isActive')}")
-                    logger.info(f"[DEBUG]     hasEmbedding: {image.get('embedding') is not None}")
-                    logger.info(f"[DEBUG]     quality: {image.get('quality')}")
-
-                    if image.get('isActive') and image.get('embedding'):
-                        enrolled_faces.append({
-                            'employee_id': employee_id,
-                            'embedding': image['embedding'],
-                            'image_id': str(image.get('_id', '')),
-                            'quality': image.get('quality', 'good'),
-                            'det_score': image.get('detScore', 0)
-                        })
-                        logger.info(f"[DEBUG]     Added to enrolled faces")
-
-            logger.info(f"[DEBUG] Total documents processed: {doc_count}")
-            logger.info(f"[DEBUG] Total enrolled face embeddings: {len(enrolled_faces)}")
-
-            if not enrolled_faces:
-                logger.warning("[DEBUG] No enrolled faces found. Checking all documents...")
-                all_docs = await collection.find({'companyId': {'$in': company_id_variants}}).to_list(length=10)
-                logger.info(f"[DEBUG] All documents for company: {len(all_docs)}")
-
-                for idx, doc in enumerate(all_docs):
-                    logger.info(f"[DEBUG] Doc {idx}: companyId={doc.get('companyId')} ({type(doc.get('companyId')).__name__}), "
-                              f"employeeId={doc.get('employeeId')}, "
-                              f"isEnrolled={doc.get('isEnrolled')}, "
-                              f"enrollmentStatus={doc.get('enrollmentStatus')}, "
-                              f"isLocked={doc.get('isLocked')}, "
-                              f"numImages={len(doc.get('images', []))}")
-
-            logger.info(f"[DEBUG] Returning {len(enrolled_faces)} enrolled faces")
-            return enrolled_faces
-
-        except Exception as e:
-            logger.error(f"Failed to get enrolled faces: {str(e)}")
-            logger.error(f"[DEBUG] Full traceback: {traceback.format_exc()}")
-            return []
-
+  
     async def _find_best_match(
         self,
         query_embedding: List[float],

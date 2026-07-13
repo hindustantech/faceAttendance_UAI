@@ -22,7 +22,6 @@ logger = setup_logger(__name__)
 face_training_service = None
 face_recognition_service = None
 anti_spoofing_service = None
-face_detection_service = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -30,19 +29,19 @@ async def lifespan(app: FastAPI):
     Application lifespan manager
     Handles startup and shutdown events
     """
-    global face_training_service, face_recognition_service, anti_spoofing_service, face_detection_service
-
+    global face_training_service, face_recognition_service, anti_spoofing_service
+    
     # Startup
     logger.info("=" * 50)
     logger.info(f"Starting {settings.APP_NAME} v{settings.VERSION}")
     logger.info("=" * 50)
-
+    
     try:
         # Initialize Anti-Spoofing Service
         anti_spoofing_service = AntiSpoofingService()
         await anti_spoofing_service.initialize()
         logger.info("✓ Anti-spoofing service initialized")
-
+        
         # Initialize Face Training Service
         face_training_service = FaceTrainingService()
         await face_training_service.initialize()
@@ -52,34 +51,31 @@ async def lifespan(app: FastAPI):
         face_recognition_service = FaceRecognitionService()
         await face_recognition_service.initialize()
         logger.info("✓ Face recognition service initialized")
-
-        # Reuse the detector FaceRecognitionService already initialized
-        # instead of constructing + initializing a second FaceDetectionService.
-        # (Previously this created a brand-new instance here that was never
-        # assigned to the module-level global, so it was both a duplicate
-        # model load AND unreachable by anything outside this block.)
-        face_detection_service = face_recognition_service.face_detector
+        
+        # Initialize Face Detection Service
+        face_detection_service = FaceDetectionService()
+        await face_detection_service.initialize()
         logger.info("✓ Face detection service initialized")
-
+        
         logger.info("=" * 50)
         logger.info(f"{settings.APP_NAME} is ready to serve requests")
         logger.info("=" * 50)
-
+        
     except Exception as e:
         logger.error(f"Failed to initialize services: {str(e)}")
         raise
-
+    
     yield
-
+    
     # Shutdown
     logger.info("Shutting down services...")
-
+    
     if face_recognition_service:
         await face_recognition_service.cleanup()
-
+    
     if face_training_service:
         await face_training_service.cleanup()
-
+    
     logger.info(f"{settings.APP_NAME} shutdown complete")
 
 # Create FastAPI application
@@ -109,18 +105,18 @@ async def add_request_id(request: Request, call_next):
     """Add unique request ID and process time to each request"""
     request_id = f"{int(time.time() * 1000)}-{id(request)}"
     request.state.request_id = request_id
-
+    
     start_time = time.time()
-
+    
     try:
         response = await call_next(request)
         process_time = time.time() - start_time
-
+        
         response.headers["X-Request-ID"] = request_id
         response.headers["X-Process-Time"] = str(round(process_time, 4))
-
+        
         return response
-
+        
     except Exception as e:
         logger.error(f"Request failed: {str(e)}")
         raise
@@ -136,7 +132,7 @@ app.include_router(
     prefix="/api/v1/face-detection",
     tags=["Face Detection"]
 )
-
+ 
 app.include_router(
     training.router,
     prefix="/api/v1/face-training",
