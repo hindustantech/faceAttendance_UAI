@@ -1,4 +1,4 @@
-# app/services/face_recognition.py (improved version)
+# app/services/face_recognition.py (with debug logging)
 
 import numpy as np
 from typing import Dict, List, Optional, Tuple
@@ -7,6 +7,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from redis import asyncio as aioredis
 import json
 from bson import ObjectId
+import traceback
 
 from app.config import settings
 from app.services.face_detection import FaceDetectionService
@@ -28,11 +29,23 @@ class FaceRecognitionService:
         """Initialize connections"""
         try:
             # Initialize MongoDB
+            logger.info(f"[DEBUG] Connecting to MongoDB: {settings.MONGODB_URI}")
+            logger.info(f"[DEBUG] Database name: {settings.MONGODB_DB_NAME}")
+            
             self.mongo_client = AsyncIOMotorClient(
                 settings.MONGODB_URI,
-                maxPoolSize=10
+                maxPoolSize=10,
+                serverSelectionTimeoutMS=5000
             )
             self.db = self.mongo_client[settings.MONGODB_DB_NAME]
+            
+            # Test MongoDB connection
+            await self.mongo_client.admin.command('ping')
+            logger.info("[DEBUG] MongoDB connection successful")
+            
+            # List collections
+            collections = await self.db.list_collection_names()
+            logger.info(f"[DEBUG] Available collections: {collections}")
             
             # Try Redis, but continue if not available
             try:
@@ -55,6 +68,7 @@ class FaceRecognitionService:
             
         except Exception as e:
             logger.error(f"Failed to initialize recognition service: {str(e)}")
+            logger.error(f"[DEBUG] Full traceback: {traceback.format_exc()}")
             raise
     
     async def cleanup(self):
@@ -68,37 +82,51 @@ class FaceRecognitionService:
         self,
         image_data: np.ndarray,
         company_id: str,
-        employee_id: str = None,  # Added optional employee_id for 1:1 verification
+        employee_id: str = None,
         purpose: str = "punch_in",
         device_info: Dict = None
     ) -> Dict:
         """
         Verify a face - supports both 1:1 and 1:N matching
-        
-        If employee_id is provided: 1:1 verification (verify specific employee)
-        If employee_id is None: 1:N verification (find employee in company)
         """
         start_time = datetime.utcnow()
         
+        logger.info(f"[DEBUG] ========== START VERIFICATION ==========")
+        logger.info(f"[DEBUG] Company ID: {company_id}")
+        logger.info(f"[DEBUG] Employee ID: {employee_id}")
+        logger.info(f"[DEBUG] Purpose: {purpose}")
+        logger.info(f"[DEBUG] Image shape: {image_data.shape if image_data is not None else 'None'}")
+        
         try:
             # Detect face
+            logger.info("[DEBUG] Starting face detection...")
             faces = await self.face_detector.detect_faces(image_data)
+            logger.info(f"[DEBUG] Faces detected: {len(faces) if faces else 0}")
             
             if not faces:
+                logger.warning("[DEBUG] No faces detected in image")
                 return self._create_error_response(
                     "No face detected in image",
                     start_time
                 )
             
             if len(faces) > 1:
+                logger.warning(f"[DEBUG] Multiple faces detected: {len(faces)}")
                 return self._create_error_response(
                     "Multiple faces detected. Please provide image with single face.",
                     start_time
                 )
             
             query_face = faces[0]
+            logger.info(f"[DEBUG] Face detection score: {query_face.get('det_score')}")
+            logger.info(f"[DEBUG] Face embedding exists: {query_face.get('embedding') is not None}")
+            
+            if query_face.get('embedding'):
+                logger.info(f"[DEBUG] Embedding length: {len(query_face['embedding'])}")
+                logger.info(f"[DEBUG] Embedding first 5 values: {query_face['embedding'][:5]}")
             
             if not query_face.get('embedding'):
+                logger.error("[DEBUG] No embedding generated for detected face")
                 return self._create_error_response(
                     "Failed to generate face embedding",
                     start_time
@@ -106,6 +134,7 @@ class FaceRecognitionService:
             
             # If employee_id provided, do 1:1 verification
             if employee_id:
+                logger.info(f"[DEBUG] Performing 1:1 verification for employee {employee_id}")
                 result = await self._verify_specific_employee(
                     query_face,
                     company_id,
@@ -116,6 +145,7 @@ class FaceRecognitionService:
                 )
             else:
                 # Do 1:N matching against all company employees
+                logger.info(f"[DEBUG] Performing 1:N verification for company {company_id}")
                 result = await self._verify_against_company(
                     query_face,
                     company_id,
@@ -124,10 +154,12 @@ class FaceRecognitionService:
                     start_time
                 )
             
+            logger.info(f"[DEBUG] Verification result: {result}")
             return result
                 
         except Exception as e:
             logger.error(f"Verification failed: {str(e)}", exc_info=True)
+            logger.error(f"[DEBUG] Full traceback: {traceback.format_exc()}")
             raise
     
     async def _verify_specific_employee(
@@ -141,12 +173,37 @@ class FaceRecognitionService:
     ) -> Dict:
         """1:1 verification - verify if face matches specific employee"""
         try:
-            logger.info(f"Performing 1:1 verification for employee {employee_id}")
+            logger.info(f"[DEBUG] ========== 1:1 VERIFICATION ==========")
+            logger.info(f"[DEBUG] Company ID: {company_id}")
+            logger.info(f"[DEBUG] Employee ID: {employee_id}")
             
             # Get specific employee's enrolled faces
+            logger.info("[DEBUG] Fetching employee faces from database...")
             employee_faces = await self._get_employee_faces(company_id, employee_id)
             
+            logger.info(f"[DEBUG] Employee faces found: {employee_faces is not None}")
+            if employee_faces:
+                logger.info(f"[DEBUG] Employee document keys: {list(employee_faces.keys())}")
+                logger.info(f"[DEBUG] isEnrolled: {employee_faces.get('isEnrolled')}")
+                logger.info(f"[DEBUG] enrollmentStatus: {employee_faces.get('enrollmentStatus')}")
+                logger.info(f"[DEBUG] Number of images: {len(employee_faces.get('images', []))}")
+                logger.info(f"[DEBUG] isLocked: {employee_faces.get('isLocked')}")
+                logger.info(f"[DEBUG] Employee ID in doc: {employee_faces.get('employeeId')}")
+                logger.info(f"[DEBUG] Company ID in doc: {employee_faces.get('companyId')}")
+                
+                # Check each image
+                for idx, image in enumerate(employee_faces.get('images', [])):
+                    logger.info(f"[DEBUG] Image {idx}: isActive={image.get('isActive')}, "
+                              f"hasEmbedding={image.get('embedding') is not None}, "
+                              f"quality={image.get('quality')}, "
+                              f"detScore={image.get('detScore')}")
+                    if image.get('embedding'):
+                        logger.info(f"[DEBUG] Image {idx} embedding length: {len(image['embedding'])}")
+            else:
+                logger.warning(f"[DEBUG] No employee document found for employee_id: {employee_id}")
+            
             if not employee_faces:
+                logger.error(f"[DEBUG] No enrolled faces found for employee {employee_id}")
                 return self._create_error_response(
                     f"No enrolled faces found for employee {employee_id}",
                     start_time
@@ -154,6 +211,7 @@ class FaceRecognitionService:
             
             # Check if employee is locked
             if employee_faces.get('isLocked'):
+                logger.warning(f"[DEBUG] Employee {employee_id} account is locked: {employee_faces.get('lockReason')}")
                 return self._create_error_response(
                     f"Employee {employee_id} account is locked: {employee_faces.get('lockReason', 'Unknown reason')}",
                     start_time
@@ -161,21 +219,34 @@ class FaceRecognitionService:
             
             # Extract embeddings from employee's images
             enrolled_embeddings = []
-            for image in employee_faces.get('images', []):
+            for idx, image in enumerate(employee_faces.get('images', [])):
+                logger.info(f"[DEBUG] Processing image {idx}:")
+                logger.info(f"[DEBUG]   isActive: {image.get('isActive')}")
+                logger.info(f"[DEBUG]   has embedding: {image.get('embedding') is not None}")
+                
                 if image.get('isActive') and image.get('embedding'):
-                    enrolled_embeddings.append({
+                    embedding_data = {
                         'embedding': image['embedding'],
                         'image_id': str(image.get('_id', '')),
                         'quality': image.get('quality', 'good')
-                    })
+                    }
+                    enrolled_embeddings.append(embedding_data)
+                    logger.info(f"[DEBUG]   Added embedding, image_id: {embedding_data['image_id']}")
+                else:
+                    logger.warning(f"[DEBUG]   Image {idx} skipped: isActive={image.get('isActive')}, "
+                                 f"hasEmbedding={image.get('embedding') is not None}")
+            
+            logger.info(f"[DEBUG] Total valid enrolled embeddings: {len(enrolled_embeddings)}")
             
             if not enrolled_embeddings:
+                logger.error("[DEBUG] No valid face embeddings found for employee")
                 return self._create_error_response(
                     "No valid face embeddings found for employee",
                     start_time
                 )
             
             # Compare with all employee's enrolled faces
+            logger.info("[DEBUG] Starting face comparison...")
             best_match = await self._find_best_match(
                 query_face['embedding'],
                 enrolled_embeddings
@@ -183,8 +254,19 @@ class FaceRecognitionService:
             
             processing_time = (datetime.utcnow() - start_time).total_seconds()
             
+            if best_match:
+                logger.info(f"[DEBUG] Best match found:")
+                logger.info(f"[DEBUG]   Employee ID: {best_match.get('employee_id')}")
+                logger.info(f"[DEBUG]   Similarity: {best_match.get('similarity')}")
+                logger.info(f"[DEBUG]   Image ID: {best_match.get('image_id')}")
+                logger.info(f"[DEBUG]   Quality: {best_match.get('quality')}")
+            else:
+                logger.warning("[DEBUG] No match found (best_match is None)")
+            
             # Check if match meets threshold
             is_matched = best_match and best_match['similarity'] >= settings.FACE_MATCH_THRESHOLD
+            logger.info(f"[DEBUG] Match threshold: {settings.FACE_MATCH_THRESHOLD}")
+            logger.info(f"[DEBUG] Is matched: {is_matched}")
             
             # Log the verification attempt
             await self._log_verification(
@@ -199,9 +281,10 @@ class FaceRecognitionService:
             
             # Update consecutive failed attempts
             if not is_matched:
+                logger.warning(f"[DEBUG] Verification failed, handling failed attempt")
                 await self._handle_failed_attempt(company_id, employee_id)
             
-            return {
+            result = {
                 'success': True,
                 'data': {
                     'matched': is_matched,
@@ -216,8 +299,12 @@ class FaceRecognitionService:
                 }
             }
             
+            logger.info(f"[DEBUG] Verification result: {json.dumps(result, default=str)}")
+            return result
+            
         except Exception as e:
             logger.error(f"1:1 verification failed: {str(e)}", exc_info=True)
+            logger.error(f"[DEBUG] Full traceback: {traceback.format_exc()}")
             raise
     
     async def _verify_against_company(
@@ -230,18 +317,30 @@ class FaceRecognitionService:
     ) -> Dict:
         """1:N verification - find best match in company"""
         try:
-            logger.info(f"Performing 1:N verification for company {company_id}")
+            logger.info(f"[DEBUG] ========== 1:N VERIFICATION ==========")
+            logger.info(f"[DEBUG] Company ID: {company_id}")
             
             # Get all enrolled faces for company
+            logger.info("[DEBUG] Fetching all enrolled faces for company...")
             enrolled_faces = await self._get_enrolled_faces(company_id)
             
+            logger.info(f"[DEBUG] Total enrolled faces found: {len(enrolled_faces)}")
+            
+            if enrolled_faces:
+                # Log unique employee IDs
+                unique_employees = set(f['employee_id'] for f in enrolled_faces)
+                logger.info(f"[DEBUG] Unique employees: {len(unique_employees)}")
+                logger.info(f"[DEBUG] Employee IDs: {unique_employees}")
+            
             if not enrolled_faces:
+                logger.warning("[DEBUG] No enrolled faces found in company")
                 return self._create_error_response(
                     "No enrolled faces found in company",
                     start_time
                 )
             
             # Find best match
+            logger.info("[DEBUG] Finding best match...")
             best_match = await self._find_best_match(
                 query_face['embedding'],
                 enrolled_faces
@@ -249,7 +348,14 @@ class FaceRecognitionService:
             
             processing_time = (datetime.utcnow() - start_time).total_seconds()
             
+            if best_match:
+                logger.info(f"[DEBUG] Best match: {best_match}")
+            else:
+                logger.warning("[DEBUG] No match found")
+            
             is_matched = best_match and best_match['similarity'] >= settings.FACE_MATCH_THRESHOLD
+            logger.info(f"[DEBUG] Match threshold: {settings.FACE_MATCH_THRESHOLD}")
+            logger.info(f"[DEBUG] Is matched: {is_matched}")
             
             if is_matched:
                 # Log successful verification
@@ -307,6 +413,7 @@ class FaceRecognitionService:
                 
         except Exception as e:
             logger.error(f"1:N verification failed: {str(e)}", exc_info=True)
+            logger.error(f"[DEBUG] Full traceback: {traceback.format_exc()}")
             raise
     
     async def identify_face(
@@ -388,69 +495,179 @@ class FaceRecognitionService:
     async def _get_employee_faces(self, company_id: str, employee_id: str) -> Optional[Dict]:
         """Get specific employee's enrolled faces"""
         try:
+            logger.info(f"[DEBUG] ========== FETCHING EMPLOYEE FACES ==========")
+            logger.info(f"[DEBUG] Company ID: {company_id} (type: {type(company_id)})")
+            logger.info(f"[DEBUG] Employee ID: {employee_id} (type: {type(employee_id)})")
+            logger.info(f"[DEBUG] Database: {self.db.name}")
+            logger.info(f"[DEBUG] Collection: faces")
+            
             # Try cache first
             if self.redis_client:
                 cache_key = f"employee_faces:{company_id}:{employee_id}"
+                logger.info(f"[DEBUG] Checking cache key: {cache_key}")
                 cached_data = await self.redis_client.get(cache_key)
                 
                 if cached_data:
+                    logger.info(f"[DEBUG] Cache HIT for {cache_key}")
                     return json.loads(cached_data)
+                else:
+                    logger.info(f"[DEBUG] Cache MISS for {cache_key}")
             
             # Get from MongoDB
             collection = self.db['faces']
+            logger.info(f"[DEBUG] MongoDB collection: {collection.name}")
+            logger.info(f"[DEBUG] MongoDB database: {collection.database.name}")
             
-            document = await collection.find_one({
+            # Try query with string first
+            query_string = {
                 'companyId': company_id,
                 'employeeId': employee_id,
                 'isEnrolled': True
-            })
+            }
+            logger.info(f"[DEBUG] Query (string): {json.dumps(query_string, default=str)}")
             
+            document = await collection.find_one(query_string)
+            logger.info(f"[DEBUG] Query result (string ID): {'FOUND' if document else 'NOT FOUND'}")
+            
+            # If not found, try with ObjectId
             if not document:
+                try:
+                    query_objectid = {
+                        'companyId': ObjectId(company_id) if ObjectId.is_valid(company_id) else company_id,
+                        'employeeId': ObjectId(employee_id) if ObjectId.is_valid(employee_id) else employee_id,
+                        'isEnrolled': True
+                    }
+                    logger.info(f"[DEBUG] Query (ObjectId): {json.dumps(query_objectid, default=str)}")
+                    
+                    document = await collection.find_one(query_objectid)
+                    logger.info(f"[DEBUG] Query result (ObjectId): {'FOUND' if document else 'NOT FOUND'}")
+                except Exception as e:
+                    logger.error(f"[DEBUG] ObjectId query failed: {str(e)}")
+            
+            # If still not found, try without isEnrolled filter
+            if not document:
+                query_no_filter = {
+                    'companyId': company_id,
+                    'employeeId': employee_id
+                }
+                logger.info(f"[DEBUG] Query (no isEnrolled filter): {json.dumps(query_no_filter, default=str)}")
+                
+                document = await collection.find_one(query_no_filter)
+                logger.info(f"[DEBUG] Query result (no filter): {'FOUND' if document else 'NOT FOUND'}")
+                
+                if document:
+                    logger.info(f"[DEBUG] Document found but isEnrolled might be false: {document.get('isEnrolled')}")
+                    logger.info(f"[DEBUG] Document enrollmentStatus: {document.get('enrollmentStatus')}")
+            
+            # If still not found, list all documents to debug
+            if not document:
+                logger.warning(f"[DEBUG] No document found. Listing all documents in collection...")
+                all_docs = await collection.find({}).to_list(length=5)
+                logger.info(f"[DEBUG] Total documents in collection: {await collection.count_documents({})}")
+                
+                for idx, doc in enumerate(all_docs):
+                    logger.info(f"[DEBUG] Document {idx}:")
+                    logger.info(f"[DEBUG]   companyId: {doc.get('companyId')}")
+                    logger.info(f"[DEBUG]   employeeId: {doc.get('employeeId')}")
+                    logger.info(f"[DEBUG]   isEnrolled: {doc.get('isEnrolled')}")
+                    logger.info(f"[DEBUG]   enrollmentStatus: {doc.get('enrollmentStatus')}")
+                
                 return None
             
             # Convert ObjectId to string for JSON serialization
+            logger.info("[DEBUG] Serializing document...")
             result = self._serialize_document(document)
+            logger.info(f"[DEBUG] Serialized result keys: {list(result.keys())}")
+            logger.info(f"[DEBUG] Employee ID in result: {result.get('employeeId')}")
+            logger.info(f"[DEBUG] Is enrolled: {result.get('isEnrolled')}")
+            logger.info(f"[DEBUG] Number of images: {len(result.get('images', []))}")
             
             # Cache if Redis is available
             if self.redis_client and result:
+                cache_key = f"employee_faces:{company_id}:{employee_id}"
+                logger.info(f"[DEBUG] Caching result with key: {cache_key}")
                 await self.redis_client.setex(
                     cache_key,
                     settings.FACE_DATABASE_CACHE_TTL,
                     json.dumps(result)
                 )
             
+            logger.info(f"[DEBUG] Successfully retrieved employee faces")
             return result
             
         except Exception as e:
             logger.error(f"Failed to get employee faces: {str(e)}")
+            logger.error(f"[DEBUG] Full traceback: {traceback.format_exc()}")
             return None
     
     async def _get_enrolled_faces(self, company_id: str) -> List[Dict]:
         """Get all enrolled faces for company"""
         try:
+            logger.info(f"[DEBUG] ========== FETCHING ALL ENROLLED FACES ==========")
+            logger.info(f"[DEBUG] Company ID: {company_id}")
+            
             # Try cache first
             if self.redis_client:
                 cache_key = f"enrolled_faces:{company_id}"
+                logger.info(f"[DEBUG] Checking cache: {cache_key}")
                 cached_data = await self.redis_client.get(cache_key)
                 
                 if cached_data:
+                    logger.info(f"[DEBUG] Cache HIT")
                     return json.loads(cached_data)
+                else:
+                    logger.info(f"[DEBUG] Cache MISS")
             
             # Get from MongoDB
             collection = self.db['faces']
+            logger.info(f"[DEBUG] Collection: {collection.name}")
             
-            cursor = collection.find({
+            # Try with string
+            query = {
                 'companyId': company_id,
                 'isEnrolled': True,
                 'enrollmentStatus': 'approved',
                 'isLocked': {'$ne': True}
+            }
+            logger.info(f"[DEBUG] Query: {json.dumps(query, default=str)}")
+            
+            # First, count total documents
+            total_docs = await collection.count_documents({})
+            logger.info(f"[DEBUG] Total documents in collection: {total_docs}")
+            
+            # Count documents for this company
+            company_docs = await collection.count_documents({'companyId': company_id})
+            logger.info(f"[DEBUG] Documents for company {company_id}: {company_docs}")
+            
+            # Count enrolled documents
+            enrolled_count = await collection.count_documents({
+                'companyId': company_id,
+                'isEnrolled': True
             })
+            logger.info(f"[DEBUG] Enrolled documents: {enrolled_count}")
+            
+            cursor = collection.find(query)
+            logger.info(f"[DEBUG] Cursor created")
             
             enrolled_faces = []
+            doc_count = 0
             
             async for document in cursor:
+                doc_count += 1
+                logger.info(f"[DEBUG] Processing document {doc_count}")
+                logger.info(f"[DEBUG]   employeeId: {document.get('employeeId')}")
+                logger.info(f"[DEBUG]   isEnrolled: {document.get('isEnrolled')}")
+                logger.info(f"[DEBUG]   enrollmentStatus: {document.get('enrollmentStatus')}")
+                logger.info(f"[DEBUG]   Number of images: {len(document.get('images', []))}")
+                
                 employee_id = str(document['employeeId'])
-                for image in document.get('images', []):
+                
+                for idx, image in enumerate(document.get('images', [])):
+                    logger.info(f"[DEBUG]   Image {idx}:")
+                    logger.info(f"[DEBUG]     isActive: {image.get('isActive')}")
+                    logger.info(f"[DEBUG]     hasEmbedding: {image.get('embedding') is not None}")
+                    logger.info(f"[DEBUG]     quality: {image.get('quality')}")
+                    
                     if image.get('isActive') and image.get('embedding'):
                         enrolled_faces.append({
                             'employee_id': employee_id,
@@ -459,20 +676,39 @@ class FaceRecognitionService:
                             'quality': image.get('quality', 'good'),
                             'det_score': image.get('detScore', 0)
                         })
+                        logger.info(f"[DEBUG]     Added to enrolled faces")
+            
+            logger.info(f"[DEBUG] Total documents processed: {doc_count}")
+            logger.info(f"[DEBUG] Total enrolled face embeddings: {len(enrolled_faces)}")
+            
+            # If no faces found, try without filters to debug
+            if not enrolled_faces:
+                logger.warning("[DEBUG] No enrolled faces found. Checking all documents...")
+                all_docs = await collection.find({'companyId': company_id}).to_list(length=10)
+                logger.info(f"[DEBUG] All documents for company: {len(all_docs)}")
+                
+                for idx, doc in enumerate(all_docs):
+                    logger.info(f"[DEBUG] Doc {idx}: employeeId={doc.get('employeeId')}, "
+                              f"isEnrolled={doc.get('isEnrolled')}, "
+                              f"enrollmentStatus={doc.get('enrollmentStatus')}, "
+                              f"isLocked={doc.get('isLocked')}")
             
             # Cache if Redis is available
             if self.redis_client and enrolled_faces:
+                cache_key = f"enrolled_faces:{company_id}"
+                logger.info(f"[DEBUG] Caching {len(enrolled_faces)} faces")
                 await self.redis_client.setex(
                     cache_key,
                     settings.FACE_DATABASE_CACHE_TTL,
                     json.dumps(enrolled_faces)
                 )
             
-            logger.info(f"Loaded {len(enrolled_faces)} enrolled faces for company {company_id}")
+            logger.info(f"[DEBUG] Returning {len(enrolled_faces)} enrolled faces")
             return enrolled_faces
             
         except Exception as e:
             logger.error(f"Failed to get enrolled faces: {str(e)}")
+            logger.error(f"[DEBUG] Full traceback: {traceback.format_exc()}")
             return []
     
     async def _find_best_match(
@@ -482,17 +718,26 @@ class FaceRecognitionService:
     ) -> Optional[Dict]:
         """Find best matching face using cosine similarity"""
         try:
+            logger.info(f"[DEBUG] ========== FINDING BEST MATCH ==========")
+            logger.info(f"[DEBUG] Query embedding length: {len(query_embedding) if query_embedding else 0}")
+            logger.info(f"[DEBUG] Enrolled faces count: {len(enrolled_faces)}")
+            
             if not query_embedding or not enrolled_faces:
+                logger.warning("[DEBUG] No query embedding or enrolled faces")
                 return None
             
             query_vec = np.array(query_embedding, dtype=np.float64)
             # Normalize query vector
-            query_vec = query_vec / np.linalg.norm(query_vec)
+            query_vec_norm = np.linalg.norm(query_vec)
+            logger.info(f"[DEBUG] Query vector norm before normalization: {query_vec_norm}")
+            query_vec = query_vec / query_vec_norm
+            logger.info(f"[DEBUG] Query vector norm after normalization: {np.linalg.norm(query_vec)}")
             
             best_match = None
             best_similarity = -1
+            similarities = []
             
-            for face in enrolled_faces:
+            for idx, face in enumerate(enrolled_faces):
                 try:
                     enrolled_vec = np.array(face['embedding'], dtype=np.float64)
                     # Normalize enrolled vector
@@ -500,6 +745,11 @@ class FaceRecognitionService:
                     
                     # Calculate cosine similarity
                     similarity = np.dot(query_vec, enrolled_vec)
+                    similarities.append(float(similarity))
+                    
+                    logger.info(f"[DEBUG] Face {idx}: employee={face['employee_id']}, "
+                              f"similarity={float(similarity):.4f}, "
+                              f"image_id={face['image_id']}")
                     
                     if similarity > best_similarity:
                         best_similarity = similarity
@@ -509,15 +759,25 @@ class FaceRecognitionService:
                             'image_id': face['image_id'],
                             'quality': face.get('quality', 'good')
                         }
+                        logger.info(f"[DEBUG] New best match: {best_match}")
                         
                 except Exception as e:
-                    logger.warning(f"Error comparing face: {str(e)}")
+                    logger.warning(f"Error comparing face {idx}: {str(e)}")
+                    logger.warning(f"[DEBUG] Face data: employee_id={face.get('employee_id')}, "
+                                 f"embedding_length={len(face.get('embedding', []))}")
                     continue
+            
+            if similarities:
+                logger.info(f"[DEBUG] All similarities: {[f'{s:.4f}' for s in similarities]}")
+                logger.info(f"[DEBUG] Best similarity: {best_similarity:.4f}")
+                logger.info(f"[DEBUG] Average similarity: {np.mean(similarities):.4f}")
+                logger.info(f"[DEBUG] Similarity range: {min(similarities):.4f} - {max(similarities):.4f}")
             
             return best_match
             
         except Exception as e:
             logger.error(f"Face matching error: {str(e)}")
+            logger.error(f"[DEBUG] Full traceback: {traceback.format_exc()}")
             return None
     
     async def _find_all_matches(
