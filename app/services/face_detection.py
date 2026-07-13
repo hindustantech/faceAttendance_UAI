@@ -9,10 +9,7 @@ from app.utils.logger import setup_logger
 logger = setup_logger(__name__)
 
 class FaceDetectionService:
-    """
-    Face Detection Service using face_recognition library
-    Works offline without downloading models
-    """
+    
     
     def __init__(self):
         self.initialized = False
