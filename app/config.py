@@ -36,7 +36,8 @@ class Settings(BaseSettings):
     REDIS_URL: str = Field(default="redis://localhost:6379/0")
 
     # Face Recognition Settings
-    FACE_MATCH_THRESHOLD: float = Field(default=0.65, ge=0.0, le=1.0)
+    # app/config.py - Update this line
+    FACE_MATCH_THRESHOLD: float = Field(default=0.45, ge=0.0, le=1.0)  # Changed from 0.65 to 0.45
     FACE_DETECTION_MODEL: str = Field(default="retinaface")
     FACE_RECOGNITION_MODEL: str = Field(default="arcface_r100_v1")
 
