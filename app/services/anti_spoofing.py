@@ -23,14 +23,18 @@ class AntiSpoofingService:
       (a) Weighted average of that category's checks falls below the
           category threshold. This is the "overall impression" signal.
 
-      (b) ANY single check in that category falls below a hard floor
-          (`hard_fail_floor`). This exists because a strongly
-          spoof-like signal (e.g. a very low moire score) should not
-          be able to be "outvoted" or averaged away by two so-so
-          passing checks. This is the piece the previous majority-vote
-          logic (screen_passed < 2) was missing -- it only flagged an
-          attack if a MAJORITY of checks failed, so one severe red flag
-          plus two lukewarm passes was scored as REAL.
+      (b) ANY single check in that category (EXCLUDING specular_glare,
+          see below) falls below a hard floor (`hard_fail_floor`). This
+          exists because a strongly spoof-like signal (e.g. a very low
+          moire score) should not be able to be "outvoted" or averaged
+          away by two so-so passing checks.
+
+    specular_glare is excluded from the hard-fail floor because it is a
+    noisy, single-signal heuristic (bright-pixel fraction) that fires on
+    normal skin highlights, window light, and ring lights just as often
+    as on phone/screen glare. It still contributes to the screen
+    category's weighted average, just can't unilaterally veto a real
+    face on its own.
 
     Both category checks are independent and either one can veto a
     "real" verdict.
@@ -50,6 +54,8 @@ class AntiSpoofingService:
         # Hard floor: ANY single check below this value is treated as a
         # strong, unambiguous spoof signal and vetoes the verdict, no
         # matter how well the other checks in that category score.
+        # NOTE: specular_glare is intentionally excluded from this floor
+        # (see class docstring) -- it's too noisy to be a unilateral veto.
         self.hard_fail_floor = 0.20
 
         # Individual check thresholds (used for per-check pass/fail reporting
@@ -79,7 +85,7 @@ class AntiSpoofingService:
         logger.info(f"  Overall spoofing threshold: {self.spoofing_threshold}")
         logger.info(f"  Screen category threshold: {self.screen_category_threshold}")
         logger.info(f"  Print category threshold: {self.print_category_threshold}")
-        logger.info(f"  Hard-fail floor (any single check): {self.hard_fail_floor}")
+        logger.info(f"  Hard-fail floor (any single check, excl. glare): {self.hard_fail_floor}")
 
     async def initialize(self):
         """Initialize anti-spoofing service"""
@@ -150,7 +156,11 @@ class AntiSpoofingService:
                 + reflectance_score * self.print_weights['paper_reflectance']
             )
 
-            screen_min_check = min(moire_score, glare_score, color_score)
+            # Hard-fail floor deliberately excludes specular_glare: it's a
+            # noisy bright-pixel heuristic that fires on ordinary skin
+            # highlights/window light/ring lights, not just screen glare,
+            # so it shouldn't be able to unilaterally veto a real face.
+            screen_min_check = min(moire_score, color_score)
             print_min_check = min(texture_score, edge_score, reflectance_score)
 
             # ================================================================
@@ -190,7 +200,7 @@ class AntiSpoofingService:
             # ---- Logging ----
             logger.info("[AntiSpoofingService.detect_spoofing] ========== RESULTS SUMMARY ==========")
             logger.info(f"  Screen weighted score: {screen_weighted:.4f} (threshold {self.screen_category_threshold}) "
-                        f"| min check: {screen_min_check:.4f} (floor {self.hard_fail_floor}) "
+                        f"| min check (excl. glare): {screen_min_check:.4f} (floor {self.hard_fail_floor}) "
                         f"| avg_fail={screen_avg_fail} hard_fail={screen_hard_fail}")
             for r in screen_checks:
                 status = "✓ PASS" if r['passed'] else "✗ FAIL"
@@ -219,6 +229,7 @@ class AntiSpoofingService:
                     'print_weighted_score': round(float(print_weighted), 4),
                     'screen_hard_fail': screen_hard_fail,
                     'print_hard_fail': print_hard_fail,
+                    'attack_type': attack_type,
                     'verdict': 'REAL' if is_real else 'SPOOF'
                 }
             }
@@ -236,6 +247,7 @@ class AntiSpoofingService:
                 'attack_type': 'UNKNOWN',
                 'details': {
                     'error': str(e),
+                    'attack_type': 'UNKNOWN',
                     'verdict': 'PASSED_ON_ERROR'
                 }
             }
@@ -358,7 +370,23 @@ class AntiSpoofingService:
             return 0.5
 
     def _analyze_specular_highlights(self, image: np.ndarray) -> float:
-        """Detect specular highlights characteristic of screens."""
+        """
+        Detect specular highlights characteristic of screens.
+
+        FIXED: previously returned `min(scores)` across the three
+        brightness thresholds (250/240/230), which meant the single
+        harshest threshold always dominated the result -- e.g. scores of
+        [0.90, 0.75, 0.15] collapsed to 0.15 even though two of the three
+        readings looked like a normal face. That's why real users with
+        ordinary skin highlights, window light, or a ring light were
+        being scored as low as 0.15 every time.
+
+        Now we average across thresholds instead, so one noisy/harsh
+        reading can't unilaterally tank the score. This check is also
+        excluded from the hard-fail floor in detect_spoofing() for the
+        same reason: it's a coarse bright-pixel heuristic, not a
+        reliable unilateral spoof signal.
+        """
         try:
             hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
             v_channel = hsv[:, :, 2]
@@ -390,7 +418,7 @@ class AntiSpoofingService:
                 else:
                     scores.append(0.90)
 
-            return min(scores) if scores else 0.5
+            return float(np.mean(scores)) if scores else 0.5
 
         except Exception as e:
             logger.warning(f"Glare analysis failed: {str(e)}")
