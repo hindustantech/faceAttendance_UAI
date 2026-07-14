@@ -5,8 +5,6 @@ import face_recognition
 from typing import List, Dict, Optional, Tuple
 from datetime import datetime
 from motor.motor_asyncio import AsyncIOMotorClient
-from redis import asyncio as aioredis
-import json
 
 from app.config import settings
 from app.utils.logger import setup_logger
@@ -19,7 +17,6 @@ class FaceDetectionService:
     def __init__(self):
         self.initialized = False
         self.mongo_client = None
-        self.redis_client = None
         self.db = None
         
     async def initialize(self):
@@ -43,19 +40,6 @@ class FaceDetectionService:
                 self.mongo_client = None
                 self.db = None
             
-            # Try Redis connection (optional)
-            try:
-                self.redis_client = await aioredis.from_url(
-                    settings.REDIS_URL,
-                    encoding="utf-8",
-                    decode_responses=True
-                )
-                await self.redis_client.ping()
-                logger.info("Redis connection established for detection service")
-            except Exception as e:
-                logger.warning(f"Redis not available for detection service: {str(e)}")
-                self.redis_client = None
-            
             # Test face_recognition library
             test_image = np.zeros((100, 100, 3), dtype=np.uint8)
             face_recognition.face_locations(test_image)
@@ -71,8 +55,6 @@ class FaceDetectionService:
         """Cleanup connections"""
         if self.mongo_client:
             self.mongo_client.close()
-        if self.redis_client:
-            await self.redis_client.close()
     
     async def detect_faces(
         self,
@@ -131,11 +113,6 @@ class FaceDetectionService:
                 face_locations
             )
             
-            # Get employee info if context provided
-            employee_info = None
-            if company_id and employee_id and self.db is not None:
-                employee_info = await self._get_employee_info(company_id, employee_id)
-            
             detected_faces = []
             
             for idx, (location, encoding, landmarks) in enumerate(
@@ -164,16 +141,6 @@ class FaceDetectionService:
                 # Extract face region
                 face_image = image_data[top:bottom, left:right]
                 
-                # Quick match check if employee context provided
-                match_info = None
-                if employee_info and encoding is not None:
-                    match_info = await self._quick_match_check(
-                        encoding, 
-                        employee_info,
-                        company_id,
-                        employee_id
-                    )
-                
                 face_info = {
                     'face_id': idx,
                     'bbox': [left, top, right, bottom],
@@ -188,10 +155,6 @@ class FaceDetectionService:
                         face_width, face_height, quality, encoding
                     ),
                 }
-                
-                # Add match info if available
-                if match_info:
-                    face_info['match_info'] = match_info
                 
                 # Add context
                 if company_id:
@@ -223,7 +186,6 @@ class FaceDetectionService:
         
         This includes additional company-specific checks like:
         - Whether the company has enrolled employees
-        - Quick match against company employees
         - Company-specific thresholds
         """
         try:
@@ -258,11 +220,10 @@ class FaceDetectionService:
         min_confidence: float = 0.5
     ) -> Dict:
         """
-        Detect faces for a specific employee with quick match check
+        Detect faces for a specific employee
         
         This includes:
         - Face detection
-        - Quick comparison with employee's enrolled faces
         - Employee-specific validation
         """
         try:
@@ -287,115 +248,17 @@ class FaceDetectionService:
                 'faces': self._format_faces_for_response(faces),
                 'employee_context': employee_info,
                 'is_enrollment_ready': len(faces) == 1 and faces[0].get('is_enrollment_ready', False),
-                'quick_match': faces[0].get('match_info') if faces else None,
             }
             
         except Exception as e:
             logger.error(f"Employee-specific detection error: {str(e)}")
             raise
     
-    async def _quick_match_check(
-        self,
-        query_encoding: np.ndarray,
-        employee_info: Dict,
-        company_id: str,
-        employee_id: str
-    ) -> Optional[Dict]:
-        """Quick preliminary match check against employee's enrolled faces"""
-        try:
-            if not employee_info or 'images' not in employee_info:
-                return None
-            
-            best_similarity = 0
-            matched_image_id = None
-            
-            query_vec = np.array(query_encoding, dtype=np.float64)
-            query_vec = query_vec / np.linalg.norm(query_vec)
-            
-            for image in employee_info.get('images', []):
-                if image.get('isActive') and image.get('embedding'):
-                    enrolled_vec = np.array(image['embedding'], dtype=np.float64)
-                    enrolled_vec = enrolled_vec / np.linalg.norm(enrolled_vec)
-                    
-                    similarity = float(np.dot(query_vec, enrolled_vec))
-                    
-                    if similarity > best_similarity:
-                        best_similarity = similarity
-                        matched_image_id = str(image.get('_id', ''))
-            
-            if best_similarity > 0:
-                return {
-                    'employee_id': employee_id,
-                    'similarity': round(best_similarity, 4),
-                    'matched_image_id': matched_image_id,
-                    'is_potential_match': best_similarity >= settings.FACE_MATCH_THRESHOLD,
-                    'confidence_level': 'high' if best_similarity > 0.8 
-                                      else 'medium' if best_similarity > 0.6 
-                                      else 'low'
-                }
-            
-            return None
-            
-        except Exception as e:
-            logger.warning(f"Quick match check failed: {str(e)}")
-            return None
-    
-    async def _get_employee_info(
-        self, 
-        company_id: str, 
-        employee_id: str
-    ) -> Optional[Dict]:
-        """Get employee face info from database"""
-        try:
-            if self.db is None:
-                return None
-            
-            # Try cache first
-            if self.redis_client:
-                cache_key = f"employee_info:{company_id}:{employee_id}"
-                cached = await self.redis_client.get(cache_key)
-                if cached:
-                    return json.loads(cached)
-            
-            # Get from MongoDB
-            collection = self.db['faces']
-            document = await collection.find_one({
-                'companyId': company_id,
-                'employeeId': employee_id
-            })
-            
-            if document:
-                # Serialize for caching
-                result = self._serialize_document(document)
-                
-                # Cache if Redis available
-                if self.redis_client:
-                    await self.redis_client.setex(
-                        cache_key,
-                        300,  # 5 minutes cache
-                        json.dumps(result)
-                    )
-                
-                return result
-            
-            return None
-            
-        except Exception as e:
-            logger.warning(f"Failed to get employee info: {str(e)}")
-            return None
-    
     async def _get_company_detection_info(self, company_id: str) -> Dict:
         """Get company-specific information for detection context"""
         try:
             if self.db is None:
                 return {'company_id': company_id}
-            
-            # Try cache
-            if self.redis_client:
-                cache_key = f"company_detection_info:{company_id}"
-                cached = await self.redis_client.get(cache_key)
-                if cached:
-                    return json.loads(cached)
             
             collection = self.db['faces']
             
@@ -439,14 +302,6 @@ class FaceDetectionService:
                 'has_enrolled_faces': total_enrolled > 0,
                 'recent_detections': recent_detections[:5]
             }
-            
-            # Cache
-            if self.redis_client:
-                await self.redis_client.setex(
-                    cache_key,
-                    60,  # 1 minute cache
-                    json.dumps(info, default=str)
-                )
             
             return info
             
@@ -553,9 +408,6 @@ class FaceDetectionService:
                 "has_embedding": f["embedding"] is not None,
                 "is_enrollment_ready": f.get("is_enrollment_ready", False),
             }
-            
-            if f.get("match_info"):
-                face_data["match_info"] = f["match_info"]
             
             formatted.append(face_data)
         

@@ -34,7 +34,7 @@ async def detect_face(
 
     Optional Parameters:
     - company_id: Provides company context for detection
-    - employee_id: Provides employee context with quick match check
+    - employee_id: Provides employee context (enrollment status, etc.)
 
     Returns:
     - face_count: number of faces found
@@ -70,7 +70,7 @@ async def detect_face(
         try:
             # Perform detection based on context
             if employee_id and company_id:
-                # Employee-specific detection with quick match
+                # Employee-specific detection
                 result = await detector.detect_face_for_employee(
                     image_data=image,
                     company_id=company_id,
@@ -231,11 +231,10 @@ async def detect_face_for_employee(
     api_key: str = Depends(verify_api_key)
 ):
     """
-    Detect face specifically for an employee with quick match check.
+    Detect face specifically for an employee.
     
     This endpoint provides:
     - Face detection for specific employee
-    - Quick preliminary match against employee's enrolled faces
     - Employee enrollment status
     - Employee-specific validation
     
@@ -259,7 +258,7 @@ async def detect_face_for_employee(
         await detector.initialize()
 
         try:
-            # Employee-specific detection with quick match
+            # Employee-specific detection
             result = await detector.detect_face_for_employee(
                 image_data=image,
                 company_id=company_id,
@@ -282,15 +281,6 @@ async def detect_face_for_employee(
                 },
                 "timestamp": datetime.utcnow().isoformat()
             }
-
-            # Add match summary if available
-            quick_match = result.get('quick_match')
-            if quick_match:
-                response_data["data"]["match_summary"] = {
-                    "is_potential_match": quick_match.get('is_potential_match', False),
-                    "confidence_level": quick_match.get('confidence_level', 'unknown'),
-                    "similarity": quick_match.get('similarity', 0)
-                }
 
             if spoof_result:
                 response_data["data"]["spoofing"] = {
