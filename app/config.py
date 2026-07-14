@@ -37,7 +37,7 @@ class Settings(BaseSettings):
 
     # Face Recognition Settings
     # app/config.py - Update this line
-    FACE_MATCH_THRESHOLD: float = Field(default=0.45, ge=0.0, le=1.0)  # Changed from 0.65 to 0.45
+    FACE_MATCH_THRESHOLD: float = Field(default=0.45, ge=0.0, le=1.0) 
     FACE_DETECTION_MODEL: str = Field(default="retinaface")
     FACE_RECOGNITION_MODEL: str = Field(default="arcface_r100_v1")
 
