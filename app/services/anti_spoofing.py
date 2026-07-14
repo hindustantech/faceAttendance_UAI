@@ -483,10 +483,18 @@ class AntiSpoofingService:
             # Continuous scoring instead of discrete buckets.
             # peak_ratio_floor/ceiling define the range mapped to score 1.0..0.0
             # Starting points below -- RECALIBRATE against your own labeled data.
+            #
+            # NOTE (2026-07-14, second fix): outlier_ceiling was previously 0.02,
+            # which let a confirmed screen attack (outlier_frac=0.01701) score as
+            # only mildly suspicious (0.162), and a 60/40 blend with the cleaner
+            # peak_ratio axis (0.8145) diluted that up to 0.4228 -- enough to pass.
+            # Lowered the ceiling so this attack's outlier_frac lands at 0, and
+            # switched to a min-dominant blend so a clearly bad axis can no
+            # longer be averaged away by a clean one.
             peak_ratio_floor = 3.0     # at/below this -> score contribution = 1.0 (looks real)
             peak_ratio_ceiling = 14.0  # at/above this -> score contribution = 0.0 (looks like screen)
-            outlier_floor = 0.0015
-            outlier_ceiling = 0.02
+            outlier_floor = 0.001
+            outlier_ceiling = 0.012    # was 0.02 -- lowered after a real screen attack scored 0.01701 here
 
             peak_component = 1.0 - np.clip(
                 (max_peak_ratio - peak_ratio_floor) / (peak_ratio_ceiling - peak_ratio_floor),
@@ -497,9 +505,11 @@ class AntiSpoofingService:
                 0.0, 1.0
             )
 
-            # Take the more suspicious (lower) of the two signals, but blend
-            # rather than letting one noisy value dominate entirely.
-            score = 0.6 * min(peak_component, outlier_component) + 0.4 * max(peak_component, outlier_component)
+            # Min-dominant blend: if EITHER axis independently looks like a
+            # screen, that verdict should dominate rather than get averaged
+            # away by the other axis looking clean. The small max() weighting
+            # only smooths borderline noise, it cannot rescue a bad signal.
+            score = 0.85 * min(peak_component, outlier_component) + 0.15 * max(peak_component, outlier_component)
 
             if avg_high_freq_energy > 9.0:
                 score *= 0.9
