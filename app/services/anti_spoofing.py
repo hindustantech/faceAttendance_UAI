@@ -815,9 +815,9 @@ class AntiSpoofingService:
                 
                 if 2 < noise_std < 35 and noise_mean < 25:
                     scores.append(1.0)
-                elif 1.5 < noise_std < 45:
+                elif 1.5 < noise_std < 45 and noise_mean < 35:
                     scores.append(0.7)
-                elif 1 < noise_std < 55:
+                elif 1 < noise_std < 55 and noise_mean < 45:
                     scores.append(0.5)
                 else:
                     scores.append(0.3)
