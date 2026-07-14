@@ -310,8 +310,25 @@ class AntiSpoofingService:
             if is_strong_real_face:
                 logger.info(f"[AntiSpoofingService.detect_spoofing:260] Using RELAXED criteria for strong real face")
 
+                # FIX (2026-07-14, third pass): texture/edge/noise/LBP checks can
+                # all pass on a good-quality screen replica, earning enough
+                # "real_face_indicators" to hit this relaxed branch. Previously
+                # that branch only rejected if critical_failures >= 3, which let
+                # a single corroborated moire failure (moire FAIL + screen
+                # indicators from glare/color) get overridden and accepted as
+                # REAL. Moire+corroboration is specifically the signal meant to
+                # catch screens that otherwise look textured enough to pass --
+                # it must not be out-voted by the very checks it exists to
+                # override.
                 if critical_failures >= 3 and moire_score <= 0.03:
                     logger.warning(f"[AntiSpoofingService.detect_spoofing:263] ⚔ VETO: Critical failures with extreme moire")
+                    is_real = False
+                elif critical_failures >= 1 or screen_attack_indicators >= 2:
+                    logger.warning(
+                        f"[AntiSpoofingService.detect_spoofing:263b] ⚔ VETO: Moire failed and corroborated "
+                        f"(critical_failures={critical_failures}, screen_attack_indicators={screen_attack_indicators}) "
+                        f"-- texture-based real-face indicators cannot override this"
+                    )
                     is_real = False
                 else:
                     logger.info(f"[AntiSpoofingService.detect_spoofing:266] ✓ Real face ACCEPTED")
