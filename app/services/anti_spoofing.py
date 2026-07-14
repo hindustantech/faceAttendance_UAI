@@ -13,39 +13,48 @@ class AntiSpoofingService:
     Detects presentation attacks: printed photos, screen replays
     (phone/tablet/monitor/laptop), and static images held up to the camera.
 
-    BALANCED APPROACH: Catches ALL screen attacks while allowing real faces through.
+    BALANCED APPROACH: 
+    - Aggressively catches screen/photo attacks
+    - Allows real faces with natural variations through
+    - Uses multi-factor real face validation to prevent false positives
     """
 
     def __init__(self):
         logger.info(f"[AntiSpoofingService.__init__:22] Initializing BALANCED AntiSpoofingService")
         self.initialized = False
         
-        # BALANCED THRESHOLDS - Secure but not overly aggressive
-        self.spoofing_threshold = 0.60  # Balanced threshold
-        self.min_checks_required = 2    # Need at least 2 checks to fail
-        self.min_individual_threshold = 0.40  # Individual check threshold
+        # BALANCED THRESHOLDS
+        self.spoofing_threshold = 0.60
+        self.min_checks_required = 2
+        self.min_individual_threshold = 0.40
         
-        # Screen-specific thresholds - Tuned for laptop/phone screens
-        self.screen_moire_threshold = 0.40  # Below this = suspicious
-        self.screen_color_threshold = 0.50  # Below this = screen colors
-        self.strong_moire_veto = 0.15  # Only extreme moire = instant veto
-        self.low_confidence_threshold = 0.65  # Below this with indicators = reject
+        # Screen-specific thresholds
+        self.screen_moire_threshold = 0.40
+        self.screen_color_threshold = 0.50
+        self.strong_moire_veto = 0.15
+        self.extreme_moire_veto = 0.05
+        self.low_confidence_threshold = 0.65
         
-        logger.info(f"[AntiSpoofingService.__init__:35] BALANCED Thresholds:")
-        logger.info(f"[AntiSpoofingService.__init__:36]   spoofing: {self.spoofing_threshold}")
-        logger.info(f"[AntiSpoofingService.__init__:37]   min_checks: {self.min_checks_required}")
-        logger.info(f"[AntiSpoofingService.__init__:38]   min_individual: {self.min_individual_threshold}")
-        logger.info(f"[AntiSpoofingService.__init__:39]   screen_moire: {self.screen_moire_threshold}")
-        logger.info(f"[AntiSpoofingService.__init__:40]   screen_color: {self.screen_color_threshold}")
-        logger.info(f"[AntiSpoofingService.__init__:41]   strong_moire_veto: {self.strong_moire_veto}")
-        logger.info(f"[AntiSpoofingService.__init__:42]   low_confidence: {self.low_confidence_threshold}")
+        # Real face validation
+        self.real_face_min_indicators = 3
+        self.real_face_min_score = 0.68
+        self.real_face_indicator_threshold = 0.85
+        
+        logger.info(f"[AntiSpoofingService.__init__:37] BALANCED Thresholds:")
+        logger.info(f"[AntiSpoofingService.__init__:38]   spoofing: {self.spoofing_threshold}")
+        logger.info(f"[AntiSpoofingService.__init__:39]   min_checks: {self.min_checks_required}")
+        logger.info(f"[AntiSpoofingService.__init__:40]   min_individual: {self.min_individual_threshold}")
+        logger.info(f"[AntiSpoofingService.__init__:41]   screen_moire: {self.screen_moire_threshold}")
+        logger.info(f"[AntiSpoofingService.__init__:42]   screen_color: {self.screen_color_threshold}")
+        logger.info(f"[AntiSpoofingService.__init__:43]   strong_moire_veto: {self.strong_moire_veto}")
+        logger.info(f"[AntiSpoofingService.__init__:44]   real_face_min_score: {self.real_face_min_score}")
 
     async def initialize(self):
         """Initialize anti-spoofing service"""
-        logger.info(f"[AntiSpoofingService.initialize:46] Starting initialization")
+        logger.info(f"[AntiSpoofingService.initialize:48] Starting initialization")
         self.initialized = True
         logger.info("Anti-spoofing service initialized - BALANCED MODE")
-        logger.info(f"[AntiSpoofingService.initialize:49] Initialization complete")
+        logger.info(f"[AntiSpoofingService.initialize:51] Initialization complete")
 
     async def detect_spoofing(
         self,
@@ -55,9 +64,9 @@ class AntiSpoofingService:
         """
         Detect if face is real or spoofed - BALANCED detection.
         """
-        logger.info(f"[AntiSpoofingService.detect_spoofing:59] ========== STARTING BALANCED SPOOFING DETECTION ==========")
-        logger.info(f"[AntiSpoofingService.detect_spoofing:60] Image shape: {image_data.shape}, dtype: {image_data.dtype}")
-        logger.info(f"[AntiSpoofingService.detect_spoofing:61] Motion frames: {motion_frames is not None}, "
+        logger.info(f"[AntiSpoofingService.detect_spoofing:61] ========== STARTING BALANCED SPOOFING DETECTION ==========")
+        logger.info(f"[AntiSpoofingService.detect_spoofing:62] Image shape: {image_data.shape}, dtype: {image_data.dtype}")
+        logger.info(f"[AntiSpoofingService.detect_spoofing:63] Motion frames: {motion_frames is not None}, "
                     f"count: {len(motion_frames) if motion_frames else 0}")
         
         try:
@@ -66,79 +75,108 @@ class AntiSpoofingService:
             critical_failures = 0
             real_face_indicators = 0
             
+            # ================================================================
             # Check 1: Texture Analysis
-            logger.info(f"[AntiSpoofingService.detect_spoofing:70] Check 1/9: TEXTURE ANALYSIS")
+            # ================================================================
+            logger.info(f"[AntiSpoofingService.detect_spoofing:75] Check 1/9: TEXTURE ANALYSIS")
             texture_score = self._analyze_texture(image_data)
             results.append(self._make_result('texture_analysis', texture_score))
-            if texture_score >= 0.85: real_face_indicators += 1
+            if texture_score >= self.real_face_indicator_threshold:
+                real_face_indicators += 1
+                logger.info(f"[AntiSpoofingService.detect_spoofing:80]   ✓ Real face indicator: texture={texture_score:.4f}")
             
+            # ================================================================
             # Check 2: Color Distribution
-            logger.info(f"[AntiSpoofingService.detect_spoofing:76] Check 2/9: COLOR DISTRIBUTION")
+            # ================================================================
+            logger.info(f"[AntiSpoofingService.detect_spoofing:85] Check 2/9: COLOR DISTRIBUTION")
             color_score = self._analyze_color_distribution(image_data)
             results.append(self._make_result('color_analysis', color_score))
+            if color_score >= self.real_face_indicator_threshold:
+                real_face_indicators += 1
+                logger.info(f"[AntiSpoofingService.detect_spoofing:90]   ✓ Real face indicator: color={color_score:.4f}")
             
+            # ================================================================
             # Check 3: Screen Color Artifacts
-            logger.info(f"[AntiSpoofingService.detect_spoofing:81] Check 3/9: SCREEN COLOR ARTIFACTS")
+            # ================================================================
+            logger.info(f"[AntiSpoofingService.detect_spoofing:95] Check 3/9: SCREEN COLOR ARTIFACTS")
             screen_color_score = self._analyze_screen_color_artifacts(image_data)
             results.append(self._make_result('screen_color_artifacts', screen_color_score))
             
-            if screen_color_score <= 0.35:  # Very suspicious
+            if screen_color_score <= 0.35:
                 screen_attack_indicators += 2
                 critical_failures += 1
-                logger.warning(f"[AntiSpoofingService.detect_spoofing:88] ⚠ CRITICAL: Strong screen color artifacts!")
+                logger.warning(f"[AntiSpoofingService.detect_spoofing:102] ⚠ CRITICAL: Strong screen color artifacts! (score: {screen_color_score:.4f})")
             elif screen_color_score <= self.screen_color_threshold:
                 screen_attack_indicators += 1
-                logger.warning(f"[AntiSpoofingService.detect_spoofing:91] ⚠ Screen color artifacts suspected")
+                logger.warning(f"[AntiSpoofingService.detect_spoofing:105] ⚠ Screen color artifacts suspected (score: {screen_color_score:.4f})")
             
+            # ================================================================
             # Check 4: Edge Analysis
-            logger.info(f"[AntiSpoofingService.detect_spoofing:94] Check 4/9: EDGE ANALYSIS")
+            # ================================================================
+            logger.info(f"[AntiSpoofingService.detect_spoofing:110] Check 4/9: EDGE ANALYSIS")
             edge_score = self._analyze_edges(image_data)
             results.append(self._make_result('edge_analysis', edge_score))
-            if edge_score >= 0.85: real_face_indicators += 1
+            if edge_score >= self.real_face_indicator_threshold:
+                real_face_indicators += 1
+                logger.info(f"[AntiSpoofingService.detect_spoofing:115]   ✓ Real face indicator: edge={edge_score:.4f}")
             
+            # ================================================================
             # Check 5: Noise Pattern
-            logger.info(f"[AntiSpoofingService.detect_spoofing:100] Check 5/9: NOISE PATTERN")
+            # ================================================================
+            logger.info(f"[AntiSpoofingService.detect_spoofing:120] Check 5/9: NOISE PATTERN")
             noise_score = self._analyze_noise_pattern(image_data)
             results.append(self._make_result('noise_analysis', noise_score, threshold=0.40))
-            if noise_score >= 0.85: real_face_indicators += 1
+            if noise_score >= self.real_face_indicator_threshold:
+                real_face_indicators += 1
+                logger.info(f"[AntiSpoofingService.detect_spoofing:125]   ✓ Real face indicator: noise={noise_score:.4f}")
             
+            # ================================================================
             # Check 6: Moire Pattern (MOST IMPORTANT FOR SCREENS)
-            logger.info(f"[AntiSpoofingService.detect_spoofing:106] Check 6/9: MOIRE PATTERN")
+            # ================================================================
+            logger.info(f"[AntiSpoofingService.detect_spoofing:130] Check 6/9: MOIRE PATTERN")
             moire_score = self._detect_moire_pattern_balanced(image_data)
             results.append(self._make_result('moire_pattern', moire_score, threshold=self.screen_moire_threshold))
             
-            # Weighted moire detection
-            if moire_score <= 0.08:  # Definite screen
+            # Multi-level moire analysis
+            if moire_score <= self.extreme_moire_veto:
                 screen_attack_indicators += 3
                 critical_failures += 2
-                logger.warning(f"[AntiSpoofingService.detect_spoofing:114] ⚠ CRITICAL: Definite screen moire!")
-            elif moire_score <= 0.15:  # Very strong screen pattern
+                logger.warning(f"[AntiSpoofingService.detect_spoofing:138] ⚠ CRITICAL: Definite screen moire! (score: {moire_score:.4f})")
+            elif moire_score <= self.strong_moire_veto:
                 screen_attack_indicators += 2
                 critical_failures += 1
-                logger.warning(f"[AntiSpoofingService.detect_spoofing:118] ⚠ STRONG screen moire pattern!")
-            elif moire_score <= self.screen_moire_threshold:  # Suspicious
+                logger.warning(f"[AntiSpoofingService.detect_spoofing:142] ⚠ STRONG screen moire pattern! (score: {moire_score:.4f})")
+            elif moire_score <= self.screen_moire_threshold:
                 screen_attack_indicators += 1
-                logger.warning(f"[AntiSpoofingService.detect_spoofing:121] ⚠ Screen moire suspected")
+                logger.warning(f"[AntiSpoofingService.detect_spoofing:145] ⚠ Screen moire suspected (score: {moire_score:.4f})")
             
+            # ================================================================
             # Check 7: LBP Texture
-            logger.info(f"[AntiSpoofingService.detect_spoofing:124] Check 7/9: LBP TEXTURE")
+            # ================================================================
+            logger.info(f"[AntiSpoofingService.detect_spoofing:150] Check 7/9: LBP TEXTURE")
             lbp_score = self._analyze_texture_lbp(image_data)
             results.append(self._make_result('lbp_texture', lbp_score))
-            if lbp_score >= 0.85: real_face_indicators += 1
+            if lbp_score >= self.real_face_indicator_threshold:
+                real_face_indicators += 1
+                logger.info(f"[AntiSpoofingService.detect_spoofing:155]   ✓ Real face indicator: lbp={lbp_score:.4f}")
             
+            # ================================================================
             # Check 8: Specular Glare
-            logger.info(f"[AntiSpoofingService.detect_spoofing:130] Check 8/9: SPECULAR GLARE")
+            # ================================================================
+            logger.info(f"[AntiSpoofingService.detect_spoofing:160] Check 8/9: SPECULAR GLARE")
             glare_score = self._analyze_specular_highlights_balanced(image_data)
             results.append(self._make_result('specular_glare', glare_score))
             
-            if glare_score <= 0.25:  # Significant glare
+            if glare_score <= 0.25:
                 screen_attack_indicators += 1
-                logger.warning(f"[AntiSpoofingService.detect_spoofing:136] ⚠ Screen glare detected")
+                logger.warning(f"[AntiSpoofingService.detect_spoofing:166] ⚠ Screen glare detected (score: {glare_score:.4f})")
             
+            # ================================================================
             # Check 9: Motion Liveness (optional)
+            # ================================================================
             liveness_checked = False
             if motion_frames and len(motion_frames) >= 2:
-                logger.info(f"[AntiSpoofingService.detect_spoofing:141] Check 9/9: MOTION LIVENESS")
+                logger.info(f"[AntiSpoofingService.detect_spoofing:173] Check 9/9: MOTION LIVENESS")
                 liveness_score = self._analyze_motion_liveness(motion_frames)
                 results.append(self._make_result('motion_liveness', liveness_score))
                 liveness_checked = True
@@ -146,96 +184,109 @@ class AntiSpoofingService:
                 if liveness_score <= 0.20:
                     screen_attack_indicators += 2
                     critical_failures += 1
-                    logger.warning(f"[AntiSpoofingService.detect_spoofing:149] ⚠ Static/rigid motion detected")
+                    logger.warning(f"[AntiSpoofingService.detect_spoofing:181] ⚠ Static/rigid motion detected")
             else:
-                logger.info(f"[AntiSpoofingService.detect_spoofing:151] ⊘ Motion liveness SKIPPED")
+                logger.info(f"[AntiSpoofingService.detect_spoofing:183] ⊘ Motion liveness SKIPPED")
 
-            # Calculate results
+            # ================================================================
+            # CALCULATE RESULTS
+            # ================================================================
             passed_count = sum(1 for r in results if r['passed'])
             total_checks = len(results)
             overall_score = sum(r['score'] for r in results) / total_checks
 
-            logger.info(f"[AntiSpoofingService.detect_spoofing:158] ========== RESULTS SUMMARY ==========")
-            logger.info(f"[AntiSpoofingService.detect_spoofing:159]   Total checks: {total_checks}")
-            logger.info(f"[AntiSpoofingService.detect_spoofing:160]   Passed: {passed_count}")
-            logger.info(f"[AntiSpoofingService.detect_spoofing:161]   Overall score: {overall_score:.4f}")
-            logger.info(f"[AntiSpoofingService.detect_spoofing:162]   Screen indicators: {screen_attack_indicators}")
-            logger.info(f"[AntiSpoofingService.detect_spoofing:163]   Critical failures: {critical_failures}")
-            logger.info(f"[AntiSpoofingService.detect_spoofing:164]   Real face indicators: {real_face_indicators}")
+            logger.info(f"[AntiSpoofingService.detect_spoofing:192] ========== RESULTS SUMMARY ==========")
+            logger.info(f"[AntiSpoofingService.detect_spoofing:193]   Total checks: {total_checks}")
+            logger.info(f"[AntiSpoofingService.detect_spoofing:194]   Passed: {passed_count}")
+            logger.info(f"[AntiSpoofingService.detect_spoofing:195]   Overall score: {overall_score:.4f}")
+            logger.info(f"[AntiSpoofingService.detect_spoofing:196]   Screen indicators: {screen_attack_indicators}")
+            logger.info(f"[AntiSpoofingService.detect_spoofing:197]   Critical failures: {critical_failures}")
+            logger.info(f"[AntiSpoofingService.detect_spoofing:198]   Real face indicators: {real_face_indicators}")
             
-            # Log individual scores
             for r in results:
                 status = "✓ PASS" if r['passed'] else "✗ FAIL"
-                logger.info(f"[AntiSpoofingService.detect_spoofing:168]   {r['method']}: {r['score']:.4f} {status}")
+                logger.info(f"[AntiSpoofingService.detect_spoofing:201]   {r['method']}: {r['score']:.4f} {status}")
 
-            # ===================================================================
-            # BALANCED VETO LOGIC
-            # ===================================================================
+            # ================================================================
+            # DECISION LOGIC
+            # ================================================================
             
-            # Check if this looks like a real face
-            strong_real_face = (real_face_indicators >= 3 and overall_score >= 0.75)
+            # Check if this has strong real face characteristics
+            is_strong_real_face = (
+                real_face_indicators >= self.real_face_min_indicators and 
+                overall_score >= self.real_face_min_score
+            )
+            
+            logger.info(f"[AntiSpoofingService.detect_spoofing:213] DECISION PHASE:")
+            logger.info(f"[AntiSpoofingService.detect_spoofing:214]   Strong real face: {is_strong_real_face} "
+                       f"(indicators: {real_face_indicators}/{self.real_face_min_indicators}, "
+                       f"score: {overall_score:.4f}/{self.real_face_min_score})")
             
             is_real = True
             
-            if strong_real_face:
-                logger.info(f"[AntiSpoofingService.detect_spoofing:180] Strong real face indicators detected "
-                           f"({real_face_indicators} indicators, score: {overall_score:.4f})")
-                logger.info(f"[AntiSpoofingService.detect_spoofing:182] Using RELAXED veto criteria for real face")
-                
-                # For strong real faces, only apply critical vetos
-                if critical_failures >= 2:
-                    logger.warning(f"[AntiSpoofingService.detect_spoofing:186] ⚔ VETO: Multiple critical failures ({critical_failures})")
-                    is_real = False
+            if is_strong_real_face:
+                # REAL FACE PATH - Relaxed criteria
+                logger.info(f"[AntiSpoofingService.detect_spoofing:221] Using RELAXED criteria for strong real face")
                 
                 moire_result = next(r for r in results if r['method'] == 'moire_pattern')
-                if moire_result['score'] <= 0.08:  # Only absolute worst moire
-                    logger.warning(f"[AntiSpoofingService.detect_spoofing:191] ⚔ VETO: Extreme moire pattern ({moire_result['score']:.4f})")
+                
+                # Only reject if BOTH critical failures AND extreme moire
+                if critical_failures >= 3 and moire_result['score'] <= self.extreme_moire_veto:
+                    logger.warning(f"[AntiSpoofingService.detect_spoofing:227] ⚔ VETO REAL: {critical_failures} critical failures "
+                                 f"with extreme moire ({moire_result['score']:.4f})")
                     is_real = False
-                    
+                # Only reject if moire is extremely bad (0.03 or less)
+                elif moire_result['score'] <= 0.03:
+                    logger.warning(f"[AntiSpoofingService.detect_spoofing:231] ⚔ VETO REAL: Extreme moire ({moire_result['score']:.4f})")
+                    is_real = False
+                else:
+                    logger.info(f"[AntiSpoofingService.detect_spoofing:234] ✓ Real face ACCEPTED despite some screen indicators")
+                    is_real = True
             else:
-                # STANDARD VETO LOGIC for non-obvious real faces
+                # STANDARD PATH - Full veto logic for uncertain faces
+                logger.info(f"[AntiSpoofingService.detect_spoofing:238] Using STANDARD strict criteria")
                 
                 # VETO 1: Critical failures
                 if critical_failures >= 1:
-                    logger.warning(f"[AntiSpoofingService.detect_spoofing:199] ⚔ VETO 1: Critical failure ({critical_failures})")
+                    logger.warning(f"[AntiSpoofingService.detect_spoofing:242] ⚔ VETO 1: Critical failure ({critical_failures})")
                     is_real = False
                 
                 # VETO 2: Multiple screen indicators
                 if screen_attack_indicators >= 3:
-                    logger.warning(f"[AntiSpoofingService.detect_spoofing:204] ⚔ VETO 2: Multiple screen indicators ({screen_attack_indicators})")
+                    logger.warning(f"[AntiSpoofingService.detect_spoofing:247] ⚔ VETO 2: Multiple screen indicators ({screen_attack_indicators})")
                     is_real = False
                 
                 # VETO 3: Screen indicator + low confidence
                 if screen_attack_indicators >= 1 and overall_score < self.low_confidence_threshold:
-                    logger.warning(f"[AntiSpoofingService.detect_spoofing:209] ⚔ VETO 3: Screen indicator with low confidence "
+                    logger.warning(f"[AntiSpoofingService.detect_spoofing:252] ⚔ VETO 3: Screen indicator with low confidence "
                                  f"(score: {overall_score:.4f}, indicators: {screen_attack_indicators})")
                     is_real = False
                 
                 # VETO 4: Strong moire
                 moire_result = next(r for r in results if r['method'] == 'moire_pattern')
                 if moire_result['score'] <= self.strong_moire_veto:
-                    logger.warning(f"[AntiSpoofingService.detect_spoofing:215] ⚔ VETO 4: Strong moire ({moire_result['score']:.4f})")
+                    logger.warning(f"[AntiSpoofingService.detect_spoofing:258] ⚔ VETO 4: Strong moire ({moire_result['score']:.4f})")
                     is_real = False
                 
                 # VETO 5: Moire + other failures
                 if moire_result['score'] <= 0.30:
                     other_failures = [r for r in results if r['method'] != 'moire_pattern' and r['score'] <= 0.40]
                     if len(other_failures) >= 1:
-                        logger.warning(f"[AntiSpoofingService.detect_spoofing:222] ⚔ VETO 5: Moire + other failures "
+                        logger.warning(f"[AntiSpoofingService.detect_spoofing:265] ⚔ VETO 5: Moire + other failures "
                                      f"(moire: {moire_result['score']:.4f}, other: {len(other_failures)})")
                         is_real = False
                 
-                # VETO 6: Low overall score
+                # VETO 6: Very low overall score
                 if overall_score < 0.55:
-                    logger.warning(f"[AntiSpoofingService.detect_spoofing:228] ⚔ VETO 6: Very low confidence ({overall_score:.4f})")
+                    logger.warning(f"[AntiSpoofingService.detect_spoofing:271] ⚔ VETO 6: Very low confidence ({overall_score:.4f})")
                     is_real = False
                 
                 # VETO 7: Multiple check failures
                 if passed_count < total_checks - 1:
-                    logger.warning(f"[AntiSpoofingService.detect_spoofing:233] ⚔ VETO 7: Multiple failures ({passed_count}/{total_checks})")
+                    logger.warning(f"[AntiSpoofingService.detect_spoofing:276] ⚔ VETO 7: Multiple failures ({passed_count}/{total_checks})")
                     is_real = False
 
-            # Standard check if all vetos passed
+            # STANDARD CHECK (if all vetos passed)
             if is_real:
                 majority_needed = max(self.min_checks_required, (total_checks // 2) + 1)
                 
@@ -244,10 +295,10 @@ class AntiSpoofingService:
                     or overall_score >= 0.78
                 )
                 
-                logger.info(f"[AntiSpoofingService.detect_spoofing:245] STANDARD CHECK:")
-                logger.info(f"[AntiSpoofingService.detect_spoofing:246]   Score >= {self.spoofing_threshold}: {overall_score >= self.spoofing_threshold}")
-                logger.info(f"[AntiSpoofingService.detect_spoofing:247]   Passed >= {majority_needed}: {passed_count >= majority_needed}")
-                logger.info(f"[AntiSpoofingService.detect_spoofing:248]   Score >= 0.78: {overall_score >= 0.78}")
+                logger.info(f"[AntiSpoofingService.detect_spoofing:288] STANDARD CHECK:")
+                logger.info(f"[AntiSpoofingService.detect_spoofing:289]   Score >= {self.spoofing_threshold}: {overall_score >= self.spoofing_threshold}")
+                logger.info(f"[AntiSpoofingService.detect_spoofing:290]   Passed >= {majority_needed}: {passed_count >= majority_needed}")
+                logger.info(f"[AntiSpoofingService.detect_spoofing:291]   Score >= 0.78: {overall_score >= 0.78}")
 
             result = {
                 'is_real': is_real,
@@ -265,18 +316,18 @@ class AntiSpoofingService:
                 }
             }
 
-            logger.info(f"[AntiSpoofingService.detect_spoofing:265] ========== FINAL VERDICT: {result['details']['verdict']} ==========")
-            logger.info(f"[AntiSpoofingService.detect_spoofing:266] Score: {result['confidence']:.4f}, "
+            logger.info(f"[AntiSpoofingService.detect_spoofing:308] ========== FINAL VERDICT: {result['details']['verdict']} ==========")
+            logger.info(f"[AntiSpoofingService.detect_spoofing:309] Score: {result['confidence']:.4f}, "
                        f"Passed: {passed_count}/{total_checks}")
-            logger.info(f"[AntiSpoofingService.detect_spoofing:268] Screen: {screen_attack_indicators}, "
+            logger.info(f"[AntiSpoofingService.detect_spoofing:311] Screen: {screen_attack_indicators}, "
                        f"Critical: {critical_failures}, Real: {real_face_indicators}")
-            logger.info(f"[AntiSpoofingService.detect_spoofing:270] ========== DETECTION COMPLETE ==========")
+            logger.info(f"[AntiSpoofingService.detect_spoofing:313] ========== DETECTION COMPLETE ==========")
 
             return result
 
         except Exception as e:
-            logger.error(f"[AntiSpoofingService.detect_spoofing:274] ❌ Detection FAILED: {str(e)}", exc_info=True)
-            logger.critical(f"[AntiSpoofingService.detect_spoofing:275] FAILING CLOSED - SECURITY FIRST")
+            logger.error(f"[AntiSpoofingService.detect_spoofing:317] ❌ Detection FAILED: {str(e)}", exc_info=True)
+            logger.critical(f"[AntiSpoofingService.detect_spoofing:318] FAILING CLOSED - SECURITY FIRST")
             return {
                 'is_real': False,
                 'confidence': 0.0,
@@ -291,16 +342,16 @@ class AntiSpoofingService:
         t = threshold if threshold is not None else self.min_individual_threshold
         passed = score >= t
         result = {'method': method, 'score': score, 'passed': passed}
-        logger.info(f"[AntiSpoofingService._make_result:289] {method}: {score:.4f} (threshold: {t:.4f}) - {'PASS' if passed else 'FAIL'}")
+        logger.info(f"[AntiSpoofingService._make_result:332] {method}: {score:.4f} (threshold: {t:.4f}) - {'PASS' if passed else 'FAIL'}")
         return result
 
     # ------------------------------------------------------------------
-    # BALANCED DETECTION METHODS
+    # DETECTION METHODS
     # ------------------------------------------------------------------
 
     def _analyze_screen_color_artifacts(self, image: np.ndarray) -> float:
-        """Balanced screen color artifact detection."""
-        logger.info(f"[AntiSpoofingService._analyze_screen_color_artifacts:299] Screen color analysis...")
+        """Detect screen-specific color artifacts."""
+        logger.info(f"[AntiSpoofingService._analyze_screen_color_artifacts:342] Screen color analysis...")
         try:
             b, g, r = cv2.split(image)
             
@@ -336,10 +387,9 @@ class AntiSpoofingService:
             saturation = hsv[:, :, 1]
             sat_std = np.std(saturation)
             
-            logger.info(f"[AntiSpoofingService._analyze_screen_color_artifacts:330] "
+            logger.info(f"[AntiSpoofingService._analyze_screen_color_artifacts:373] "
                         f"High clip: {high_clip_score:.4f}, Gaps: {total_gaps}, Sat std: {sat_std:.2f}")
             
-            # BALANCED SCORING
             screen_score = 0.0
             
             if high_clip_score > 0.08:
@@ -363,18 +413,18 @@ class AntiSpoofingService:
             
             final_score = 1.0 - min(screen_score, 1.0)
             
-            logger.info(f"[AntiSpoofingService._analyze_screen_color_artifacts:352] "
+            logger.info(f"[AntiSpoofingService._analyze_screen_color_artifacts:395] "
                         f"Screen color score: {final_score:.4f}")
             
             return final_score
 
         except Exception as e:
-            logger.warning(f"[AntiSpoofingService._analyze_screen_color_artifacts:357] ❌ Failed: {str(e)}")
+            logger.warning(f"[AntiSpoofingService._analyze_screen_color_artifacts:400] ❌ Failed: {str(e)}")
             return 0.5
 
     def _detect_moire_pattern_balanced(self, image: np.ndarray) -> float:
         """Balanced moire detection - catches screens but passes real photos."""
-        logger.info(f"[AntiSpoofingService._detect_moire_pattern_balanced:363] Balanced moire detection...")
+        logger.info(f"[AntiSpoofingService._detect_moire_pattern_balanced:406] Balanced moire detection...")
         try:
             gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
             
@@ -382,17 +432,14 @@ class AntiSpoofingService:
             all_outlier_fractions = []
             all_high_freq_energies = []
             
-            # Multi-scale analysis
             scales = [(256, 256), (512, 512)]
             
             for scale_size in scales:
                 gray_scaled = cv2.resize(gray, scale_size)
                 
-                # Apply Hann window
                 hann_window = np.outer(np.hanning(scale_size[0]), np.hanning(scale_size[1]))
                 gray_windowed = gray_scaled * hann_window
                 
-                # FFT
                 f = np.fft.fft2(gray_windowed.astype(np.float32))
                 fshift = np.fft.fftshift(f)
                 magnitude = np.log1p(np.abs(fshift))
@@ -400,7 +447,6 @@ class AntiSpoofingService:
                 h, w = magnitude.shape
                 cy, cx = h // 2, w // 2
                 
-                # Check frequency bands
                 freq_bands = [
                     ('low', 5, 15),
                     ('mid', 10, 35),
@@ -433,42 +479,41 @@ class AntiSpoofingService:
             max_outlier_fraction = max(all_outlier_fractions) if all_outlier_fractions else 0
             avg_high_freq_energy = np.mean(all_high_freq_energies) if all_high_freq_energies else 0
             
-            logger.info(f"[AntiSpoofingService._detect_moire_pattern_balanced:424] "
+            logger.info(f"[AntiSpoofingService._detect_moire_pattern_balanced:465] "
                         f"Peak ratio: {max_peak_ratio:.4f}, Outlier: {max_outlier_fraction:.6f}, "
                         f"Avg energy: {avg_high_freq_energy:.4f}")
             
             # BALANCED THRESHOLDS
             if max_peak_ratio > 8.0 or max_outlier_fraction > 0.008:
-                score = 0.05  # Definite screen
+                score = 0.05
             elif max_peak_ratio > 6.0 or max_outlier_fraction > 0.005:
-                score = 0.12  # Very strong screen
+                score = 0.12
             elif max_peak_ratio > 4.5 or max_outlier_fraction > 0.002:
-                score = 0.25  # Strong screen
+                score = 0.25
             elif max_peak_ratio > 3.5:
-                score = 0.45  # Moderate
+                score = 0.45
             elif max_peak_ratio > 2.5:
-                score = 0.65  # Weak
+                score = 0.65
             else:
-                score = 0.85  # Probably natural
+                score = 0.85
             
-            # Penalty for bright screens only if very bright
             if avg_high_freq_energy > 9.0:
                 score *= 0.8
             
             score = max(0.05, min(1.0, score))
             
-            logger.info(f"[AntiSpoofingService._detect_moire_pattern_balanced:445] "
+            logger.info(f"[AntiSpoofingService._detect_moire_pattern_balanced:486] "
                         f"Final moire score: {score:.4f}")
             
             return score
 
         except Exception as e:
-            logger.warning(f"[AntiSpoofingService._detect_moire_pattern_balanced:450] ❌ Failed: {str(e)}")
+            logger.warning(f"[AntiSpoofingService._detect_moire_pattern_balanced:491] ❌ Failed: {str(e)}")
             return 0.5
 
     def _analyze_specular_highlights_balanced(self, image: np.ndarray) -> float:
         """Balanced glare detection."""
-        logger.info(f"[AntiSpoofingService._analyze_specular_highlights_balanced:456] Glare analysis...")
+        logger.info(f"[AntiSpoofingService._analyze_specular_highlights_balanced:497] Glare analysis...")
         try:
             hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
             v_channel = hsv[:, :, 2]
@@ -500,17 +545,17 @@ class AntiSpoofingService:
             
             final_score = min(scores) if scores else 0.80
             
-            logger.info(f"[AntiSpoofingService._analyze_specular_highlights_balanced:489] "
+            logger.info(f"[AntiSpoofingService._analyze_specular_highlights_balanced:530] "
                         f"Glare score: {final_score:.4f}")
             
             return final_score
 
         except Exception as e:
-            logger.warning(f"[AntiSpoofingService._analyze_specular_highlights_balanced:494] ❌ Failed: {str(e)}")
+            logger.warning(f"[AntiSpoofingService._analyze_specular_highlights_balanced:535] ❌ Failed: {str(e)}")
             return 0.5
 
     # ------------------------------------------------------------------
-    # Standard checks
+    # STANDARD CHECKS
     # ------------------------------------------------------------------
 
     def _analyze_texture(self, image: np.ndarray) -> float:
