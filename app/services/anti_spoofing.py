@@ -84,15 +84,24 @@ class AntiSpoofingService:
             results = []
 
             # ================================================================
-            # SIMPLIFIED POLICY (2026-07-14, fourth pass, per explicit request):
-            #   1. MOIRE PATTERN FAILS  -> immediate block, no other checks matter.
-            #   2. MOIRE PATTERN PASSES -> check the other two signals
-            #      (specular glare + screen color artifacts). Both must pass
-            #      for the face to be accepted as real.
-            # This replaces the multi-stage veto/relaxed-criteria logic, which
-            # kept getting out-voted by texture-based checks that a good
-            # screen replica can pass. Moire is now the sole gatekeeper, with
-            # glare/color as its only corroborating checks.
+            # MAJORITY-VOTE POLICY (2026-07-14, fifth pass -- REQUIRED CHANGE):
+            #
+            # Real production data proved moire cannot be a unilateral gate:
+            #   Confirmed SCREEN ATTACK -> peak_ratio=5.040, outlier_frac=0.01701
+            #   Confirmed REAL FACE     -> peak_ratio=4.658, outlier_frac=0.01797
+            # The real face scored WORSE on both raw metrics than the actual
+            # attack. No threshold on these numbers can separate the two --
+            # they overlap. Gating on moire alone (pass or fail as sole
+            # decider) is therefore provably wrong for this camera/pipeline,
+            # in either direction.
+            #
+            # Fix: no single check gets unilateral veto power. All three
+            # checks always run, and the verdict is a majority vote (2 of 3
+            # must agree). This is a deliberate trade-off given the evidence
+            # above -- it will not "feel" as strict as an immediate block,
+            # but an immediate block on a check this noisy blocks real users
+            # exactly as often as it blocks attackers, which is not security,
+            # it's a coin flip that happens to reject people.
             # ================================================================
 
             logger.info(f"[AntiSpoofingService.detect_spoofing] Check 1/3: MOIRE PATTERN")
@@ -100,36 +109,11 @@ class AntiSpoofingService:
             moire_result = self._make_result('moire_pattern', moire_score, threshold=self.screen_moire_threshold)
             results.append(moire_result)
 
-            if not moire_result['passed']:
-                logger.warning(
-                    f"[AntiSpoofingService.detect_spoofing] ⛔ IMMEDIATE BLOCK: "
-                    f"moire_pattern failed ({moire_score:.4f} < {self.screen_moire_threshold:.4f})"
-                )
-                logger.info(f"[AntiSpoofingService.detect_spoofing] ========== SCREEN ATTACK BLOCKED ==========")
-
-                return {
-                    'is_real': False,
-                    'confidence': round(moire_score, 4),
-                    'threshold': self.spoofing_threshold,
-                    'details': {
-                        'results': results,
-                        'passed_checks': 0,
-                        'total_checks': 1,
-                        'liveness_checked': False,
-                        'verdict': 'SPOOF',
-                        'block_reason': 'Moire pattern check failed'
-                    }
-                }
-
-            logger.info(f"[AntiSpoofingService.detect_spoofing] Moire passed ({moire_score:.4f}) -- checking 2 corroborating signals")
-
-            # CHECK 2: SPECULAR GLARE
             logger.info(f"[AntiSpoofingService.detect_spoofing] Check 2/3: SPECULAR GLARE")
             glare_score = self._analyze_specular_highlights_balanced(image_data)
             glare_result = self._make_result('specular_glare', glare_score)
             results.append(glare_result)
 
-            # CHECK 3: SCREEN COLOR ARTIFACTS
             logger.info(f"[AntiSpoofingService.detect_spoofing] Check 3/3: SCREEN COLOR ARTIFACTS")
             screen_color_score = self._analyze_screen_color_artifacts(image_data)
             color_result = self._make_result('screen_color_artifacts', screen_color_score)
@@ -139,12 +123,12 @@ class AntiSpoofingService:
             total_checks = len(results)
             overall_score = sum(r['score'] for r in results) / total_checks
 
-            # Both corroborating checks must pass for the face to be accepted.
-            is_real = glare_result['passed'] and color_result['passed']
+            # Majority vote: at least 2 of 3 checks must pass.
+            is_real = passed_count >= 2
 
             logger.info(f"[AntiSpoofingService.detect_spoofing] ========== RESULTS SUMMARY ==========")
             logger.info(f"[AntiSpoofingService.detect_spoofing]   Total checks: {total_checks}")
-            logger.info(f"[AntiSpoofingService.detect_spoofing]   Passed: {passed_count}")
+            logger.info(f"[AntiSpoofingService.detect_spoofing]   Passed: {passed_count} (need >= 2 for REAL)")
             logger.info(f"[AntiSpoofingService.detect_spoofing]   Overall score: {overall_score:.4f}")
             for r in results:
                 status = "✓ PASS" if r['passed'] else "✗ FAIL"
@@ -162,6 +146,7 @@ class AntiSpoofingService:
                     'verdict': 'REAL' if is_real else 'SPOOF'
                 }
             }
+
 
             logger.info(f"[AntiSpoofingService.detect_spoofing] ========== FINAL VERDICT: {result['details']['verdict']} ==========")
             logger.info(f"[AntiSpoofingService.detect_spoofing] ========== DETECTION COMPLETE ==========")
