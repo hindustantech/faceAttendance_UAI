@@ -1,4 +1,4 @@
-# app/services/anti_spoofing.py (CALIBRATED VERSION)
+# app/services/anti_spoofing.py (FINAL AGGRESSIVE VERSION)
 
 import cv2
 import numpy as np
@@ -11,37 +11,39 @@ logger = setup_logger(__name__)
 
 class AntiSpoofingService:
     """
-    Calibrated Anti-Spoofing Service
+    Aggressive Anti-Spoofing Service
     
-    Balanced detection that rejects actual spoofs while accepting real faces.
-    Uses weighted consensus rather than single-check rejection.
+    Multi-layer detection with strong phone/paper rejection:
+    1. Screen/Phone Detection - Moiré patterns, pixel grid, glare, borders
+    2. Print/Paper Detection - Halftone dots, paper texture
+    3. Liveness Detection - Micro-texture, natural skin characteristics
     """
 
     def __init__(self):
         self.initialized = False
         
-        # CALIBRATED THRESHOLDS - less aggressive
-        self.screen_reject_threshold = 0.55  # Was 0.40 - too strict
-        self.print_reject_threshold = 0.45   # Was 0.40
+        # Primary detector thresholds (MORE AGGRESSIVE)
+        self.screen_reject_threshold = 0.55
+        self.print_reject_threshold = 0.45
         
         # Secondary corroborating signals
-        self.min_secondary_threshold = 0.35  # Was 0.30
+        self.min_secondary_threshold = 0.35
         
         # Weighting factors
-        self.primary_weight = 0.60  # Was 0.70 - give more weight to secondary
-        self.secondary_weight = 0.40  # Was 0.30
+        self.primary_weight = 0.60
+        self.secondary_weight = 0.40
         
-        # Minimum number of checks that must agree
-        self.min_critical_consensus = 2  # At least 2 critical checks must flag spoof
+        # Minimum consensus reduced to catch more spoofs
+        self.min_critical_consensus = 1  # Only 1 strong flag needed now
 
     async def initialize(self):
         """Initialize the anti-spoofing service"""
         self.initialized = True
-        logger.info("Calibrated anti-spoofing service initialized")
+        logger.info("Aggressive anti-spoofing service initialized")
 
     async def detect_spoofing(self, image_data: np.ndarray) -> Dict:
         """
-        Multi-layer spoofing detection with consensus-based decision.
+        Multi-layer spoofing detection with aggressive screen/print rejection.
         """
         try:
             # Validate image
@@ -61,22 +63,22 @@ class AntiSpoofingService:
             # LAYER 1: SCREEN/PHONE DETECTION (PRIMARY)
             # =================================================================
             
-            # 1a. Moiré pattern detection (most reliable for screens)
+            # 1a. Moiré pattern detection (MOST RELIABLE for screens)
             moire_score = self._detect_screen_moire_enhanced(image_data)
             results.append({
                 'method': 'screen_moire',
                 'score': moire_score,
                 'critical': True,
-                'weight': 0.30
+                'weight': 0.35  # INCREASED - best screen detector
             })
             
-            # 1b. Specular glare (can false-positive on oily skin)
+            # 1b. Specular glare (glass reflection)
             glare_score = self._detect_specular_glare_enhanced(image_data)
             results.append({
                 'method': 'specular_glare',
                 'score': glare_score,
                 'critical': True,
-                'weight': 0.15  # Reduced weight - less reliable alone
+                'weight': 0.15
             })
             
             # 1c. Screen edge/border detection
@@ -85,7 +87,16 @@ class AntiSpoofingService:
                 'method': 'screen_borders',
                 'score': border_score,
                 'critical': True,
-                'weight': 0.15  # Reduced weight - backgrounds can have lines
+                'weight': 0.10
+            })
+            
+            # 1d. Pixel grid detection (screen door effect)
+            grid_score = self._detect_pixel_grid(image_data)
+            results.append({
+                'method': 'pixel_grid',
+                'score': grid_score,
+                'critical': True,
+                'weight': 0.10
             })
             
             # =================================================================
@@ -98,7 +109,7 @@ class AntiSpoofingService:
                 'method': 'halftone_pattern',
                 'score': halftone_score,
                 'critical': True,
-                'weight': 0.20
+                'weight': 0.15
             })
             
             # 2b. Paper texture analysis
@@ -107,14 +118,14 @@ class AntiSpoofingService:
                 'method': 'paper_texture',
                 'score': paper_score,
                 'critical': True,
-                'weight': 0.20
+                'weight': 0.15
             })
             
             # =================================================================
             # LAYER 3: SECONDARY CHECKS (CORROBORATING)
             # =================================================================
             
-            # 3a. Micro-texture analysis (skin has natural variation)
+            # 3a. Micro-texture analysis
             texture_score = self._analyze_micro_texture(image_data)
             results.append({
                 'method': 'micro_texture',
@@ -123,7 +134,7 @@ class AntiSpoofingService:
                 'weight': 0.35
             })
             
-            # 3b. Color distribution (real faces have natural color variation)
+            # 3b. Color distribution
             color_score = self._analyze_color_distribution(image_data)
             results.append({
                 'method': 'color_distribution',
@@ -132,7 +143,7 @@ class AntiSpoofingService:
                 'weight': 0.35
             })
             
-            # 3c. Noise pattern (camera sensors add natural noise)
+            # 3c. Noise pattern
             noise_score = self._analyze_noise_pattern(image_data)
             results.append({
                 'method': 'noise_pattern',
@@ -174,86 +185,139 @@ class AntiSpoofingService:
                          secondary_score * self.secondary_weight)
             
             # =================================================================
-            # CONSENSUS-BASED DECISION LOGIC
+            # AGGRESSIVE CONSENSUS-BASED DECISION LOGIC
             # =================================================================
             
-            # Count how many critical checks strongly indicate spoof
-            screen_spoof_flags = 0
-            print_spoof_flags = 0
+            # Separate screen and print checks
+            screen_checks = [r for r in critical_results 
+                           if r['method'] in ['screen_moire', 'specular_glare', 'screen_borders', 'pixel_grid']]
+            print_checks = [r for r in critical_results 
+                          if r['method'] in ['halftone_pattern', 'paper_texture']]
             
-            for r in critical_results:
-                if r['method'] in ['screen_moire', 'specular_glare', 'screen_borders']:
-                    if r['score'] < 0.30:  # Strong screen indicator
-                        screen_spoof_flags += 1
-                elif r['method'] in ['halftone_pattern', 'paper_texture']:
-                    if r['score'] < 0.25:  # Strong print indicator
-                        print_spoof_flags += 1
+            # Calculate combined screen score
+            if screen_checks:
+                screen_scores = [r['score'] * r['weight'] for r in screen_checks]
+                screen_weights = [r['weight'] for r in screen_checks]
+                combined_screen_score = sum(screen_scores) / sum(screen_weights)
+            else:
+                combined_screen_score = 1.0
             
-            # Count secondary checks that indicate potential spoof
+            # Calculate combined print score
+            if print_checks:
+                print_scores = [r['score'] * r['weight'] for r in print_checks]
+                print_weights = [r['weight'] for r in print_checks]
+                combined_print_score = sum(print_scores) / sum(print_weights)
+            else:
+                combined_print_score = 1.0
+            
+            # Count strong flags (very suspicious)
+            screen_spoof_flags = sum(1 for r in screen_checks if r['score'] < 0.30)
+            print_spoof_flags = sum(1 for r in print_checks if r['score'] < 0.25)
             secondary_spoof_flags = sum(1 for r in secondary_results if r['score'] < 0.25)
+            
+            # Count moderate flags (somewhat suspicious)
+            screen_moderate_flags = sum(1 for r in screen_checks if 0.30 <= r['score'] < 0.50)
+            print_moderate_flags = sum(1 for r in print_checks if 0.25 <= r['score'] < 0.45)
+            secondary_moderate_flags = sum(1 for r in secondary_results if 0.25 <= r['score'] < 0.40)
             
             # DECISION MATRIX:
             
-            # Clear screen spoof: 2+ screen detectors strongly flag it
-            if screen_spoof_flags >= self.min_critical_consensus:
+            # 1. STRONG SCREEN DETECTION: 1+ strong flags OR very low combined score
+            if screen_spoof_flags >= 1 or combined_screen_score < 0.35:
+                is_real = False
+                attack_type = "SCREEN_REPLAY"
+                confidence = 0.10
+                
+            # 2. MODERATE SCREEN + CONFIRMATION: moderate flags with secondary issues
+            elif screen_moderate_flags >= 1 and (secondary_spoof_flags >= 1 or secondary_moderate_flags >= 2):
                 is_real = False
                 attack_type = "SCREEN_REPLAY"
                 confidence = 0.15
                 
-            # Clear print spoof: 2+ print detectors strongly flag it  
-            elif print_spoof_flags >= self.min_critical_consensus:
+            # 3. COMBINED SCREEN SCORE LOW with secondary confirmation
+            elif combined_screen_score < 0.45 and secondary_spoof_flags >= 1:
                 is_real = False
-                attack_type = "PRINT_PHOTO"
-                confidence = 0.15
+                attack_type = "SCREEN_REPLAY"
+                confidence = 0.20
                 
-            # Mixed signals: primary score is borderline AND secondary checks are poor
-            elif primary_score < 0.45 and secondary_spoof_flags >= 2:
+            # 4. COMBINED SCREEN SCORE BORDERLINE with poor secondary
+            elif combined_screen_score < 0.50 and secondary_score < 0.45:
                 is_real = False
                 attack_type = "SUSPECTED_SPOOF"
                 confidence = 0.25
                 
-            # Single detector flagged but others are fine - likely real face
-            elif screen_spoof_flags == 1 or print_spoof_flags == 1:
-                # One detector false-positive, others show real face
-                if secondary_score > 0.60:  # Secondary checks strongly suggest real
-                    is_real = True
-                    attack_type = "NONE"
-                    confidence = min(final_score, 0.90)
-                else:
-                    is_real = False
-                    attack_type = "SUSPECTED_SPOOF"
-                    confidence = 0.35
-                    
-            # Good primary score and decent secondary - real face
-            elif primary_score >= 0.55:
+            # 5. STRONG PRINT DETECTION
+            elif print_spoof_flags >= 1 or combined_print_score < 0.30:
+                is_real = False
+                attack_type = "PRINT_PHOTO"
+                confidence = 0.10
+                
+            # 6. MODERATE PRINT + CONFIRMATION
+            elif print_moderate_flags >= 1 and (secondary_spoof_flags >= 1 or secondary_moderate_flags >= 2):
+                is_real = False
+                attack_type = "PRINT_PHOTO"
+                confidence = 0.15
+                
+            # 7. COMBINED PRINT SCORE LOW with secondary confirmation
+            elif combined_print_score < 0.40 and secondary_spoof_flags >= 1:
+                is_real = False
+                attack_type = "PRINT_PHOTO"
+                confidence = 0.20
+                
+            # 8. MULTIPLE MODERATE FLAGS ACROSS ALL CHECKS
+            elif (screen_moderate_flags + print_moderate_flags + secondary_moderate_flags) >= 4:
+                is_real = False
+                attack_type = "SUSPECTED_SPOOF"
+                confidence = 0.30
+                
+            # 9. GOOD SCORES: Both screen and print scores are good
+            elif combined_screen_score >= 0.60 and combined_print_score >= 0.55:
                 if secondary_score >= 0.50:
                     is_real = True
                     attack_type = "NONE"
                     confidence = min(final_score, 0.92)
                 elif secondary_score >= 0.40:
                     is_real = True
-                    attack_type = "NONE" 
+                    attack_type = "NONE"
                     confidence = min(final_score, 0.85)
                 else:
                     is_real = False
                     attack_type = "UNCERTAIN"
                     confidence = 0.40
                     
-            # Fallback: use final score with relaxed threshold
-            else:
-                if final_score >= 0.55:
+            # 10. GOOD SCREEN BUT BORDERLINE PRINT
+            elif combined_screen_score >= 0.55 and combined_print_score >= 0.45:
+                if secondary_score >= 0.55:
                     is_real = True
                     attack_type = "NONE"
-                    confidence = min(final_score, 0.85)
-                elif final_score >= 0.45:
-                    # Borderline - allow with warning
+                    confidence = min(final_score, 0.88)
+                elif secondary_score >= 0.45:
                     is_real = True
                     attack_type = "NONE"
-                    confidence = 0.50
+                    confidence = min(final_score, 0.80)
                 else:
                     is_real = False
                     attack_type = "SUSPECTED_SPOOF"
-                    confidence = final_score
+                    confidence = 0.35
+                    
+            # 11. FALLBACK: Use final score
+            else:
+                if final_score >= 0.60:
+                    is_real = True
+                    attack_type = "NONE"
+                    confidence = min(final_score, 0.85)
+                elif final_score >= 0.52 and secondary_score >= 0.55:
+                    is_real = True
+                    attack_type = "NONE"
+                    confidence = 0.65
+                elif final_score >= 0.48 and secondary_score >= 0.60:
+                    is_real = True
+                    attack_type = "NONE"
+                    confidence = 0.55
+                else:
+                    is_real = False
+                    attack_type = "SUSPECTED_SPOOF"
+                    confidence = 0.30
             
             # Ensure confidence is capped
             confidence = min(confidence, 0.95)
@@ -266,48 +330,52 @@ class AntiSpoofingService:
                     'primary_score': round(primary_score, 4),
                     'secondary_score': round(secondary_score, 4),
                     'final_score': round(final_score, 4),
+                    'combined_screen_score': round(combined_screen_score, 4),
+                    'combined_print_score': round(combined_print_score, 4),
                     'attack_type': attack_type,
                     'verdict': 'REAL' if is_real else 'SPOOF',
                     'indicators': self._get_spoof_indicators(results),
                     'diagnostics': {
                         'screen_spoof_flags': screen_spoof_flags,
+                        'screen_moderate_flags': screen_moderate_flags,
                         'print_spoof_flags': print_spoof_flags,
+                        'print_moderate_flags': print_moderate_flags,
                         'secondary_spoof_flags': secondary_spoof_flags,
-                        'consensus_required': self.min_critical_consensus
+                        'secondary_moderate_flags': secondary_moderate_flags
                     }
                 }
             }
             
             logger.info(
                 f"Anti-spoofing: {result['details']['verdict']} "
-                f"(type: {attack_type}, primary: {primary_score:.3f}, "
-                f"final: {final_score:.3f}, screen_flags: {screen_spoof_flags}, "
-                f"print_flags: {print_spoof_flags})"
+                f"(type: {attack_type}, screen: {combined_screen_score:.3f}, "
+                f"print: {combined_print_score:.3f}, final: {final_score:.3f}, "
+                f"screen_flags: {screen_spoof_flags}/{screen_moderate_flags}, "
+                f"print_flags: {print_spoof_flags}/{print_moderate_flags})"
             )
             
             return result
             
         except Exception as e:
             logger.error(f"Spoofing detection error: {str(e)}", exc_info=True)
-            # FAIL-OPEN for internal errors to avoid blocking real users
-            # But log the error for investigation
+            # FAIL-CLOSED for errors to maintain security
             return {
-                'is_real': True,  # Changed from False to True for errors
-                'confidence': 0.5,
+                'is_real': False,
+                'confidence': 0.0,
                 'details': {
                     'error': str(e),
-                    'verdict': 'ERROR_BYPASS'
+                    'verdict': 'ERROR'
                 }
             }
 
     # =====================================================================
-    # PRIMARY DETECTORS (unchanged implementation)
+    # PRIMARY DETECTORS
     # =====================================================================
 
     def _detect_screen_moire_enhanced(self, image: np.ndarray) -> float:
         """
         Detect moiré interference patterns from screen photography.
-        This is the most reliable screen detector.
+        MORE SENSITIVE thresholds to catch subtle screen patterns.
         """
         try:
             gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
@@ -348,16 +416,16 @@ class AntiSpoofingService:
                 else:
                     peakiness = (max_e - mean_e) / std_e
                 
-                # Convert peakiness to score (higher = more likely real)
-                if peakiness < 3.5:
+                # MORE SENSITIVE thresholds
+                if peakiness < 2.5:       # Was 3.5
                     score = 1.0
-                elif peakiness < 5.0:
+                elif peakiness < 3.5:     # Was 5.0
                     score = 0.8
-                elif peakiness < 6.5:
+                elif peakiness < 4.5:     # Was 6.5
                     score = 0.6
-                elif peakiness < 8.0:
+                elif peakiness < 5.5:     # Was 8.0
                     score = 0.4
-                elif peakiness < 10.0:
+                elif peakiness < 7.0:     # Was 10.0
                     score = 0.2
                 else:
                     score = 0.1
@@ -376,18 +444,71 @@ class AntiSpoofingService:
             logger.warning(f"Moiré detection error: {str(e)}")
             return 0.5
 
-    def _detect_specular_glare_enhanced(self, image: np.ndarray) -> float:
+    def _detect_pixel_grid(self, image: np.ndarray) -> float:
         """
-        Detect specular highlights from glossy screens.
-        Less reliable alone - oily skin can cause false positives.
+        Detect screen pixel grid (screen door effect).
+        When photographing a screen, the camera captures the actual pixel structure.
         """
         try:
             gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
             
-            # Use higher threshold to avoid false positives from skin shine
-            bright_mask = (gray > 240).astype(np.uint8) * 255  # Was 235
+            # Use high-pass filter to enhance fine details
+            blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+            high_pass = cv2.absdiff(gray, blurred)
             
-            # Find connected bright regions
+            # Look for regular grid patterns using autocorrelation
+            h, w = high_pass.shape
+            crop = high_pass[h//4:3*h//4, w//4:3*w//4]
+            crop = crop.astype(np.float32) / 255.0
+            
+            # Compute 2D autocorrelation
+            f = np.fft.fft2(crop)
+            power_spectrum = np.abs(f) ** 2
+            autocorr = np.fft.ifft2(power_spectrum).real
+            autocorr = np.fft.fftshift(autocorr)
+            
+            h_ac, w_ac = autocorr.shape
+            cy_ac, cx_ac = h_ac // 2, w_ac // 2
+            
+            # Check for peaks at regular intervals
+            peak_distances = []
+            threshold = np.max(autocorr) * 0.3
+            
+            for angle in range(0, 180, 45):
+                angle_rad = np.radians(angle)
+                for dist in range(5, min(h_ac, w_ac)//4, 2):
+                    y = int(cy_ac + dist * np.sin(angle_rad))
+                    x = int(cx_ac + dist * np.cos(angle_rad))
+                    if 0 <= y < h_ac and 0 <= x < w_ac:
+                        if autocorr[y, x] > threshold:
+                            peak_distances.append(dist)
+            
+            if len(peak_distances) > 5:
+                diffs = np.diff(sorted(peak_distances))
+                if len(diffs) > 0:
+                    regularity = 1.0 - (np.std(diffs) / (np.mean(diffs) + 1e-6))
+                    regularity = max(0, min(1, regularity))
+                else:
+                    regularity = 0
+                score = 1.0 - regularity
+            else:
+                score = 1.0
+            
+            return float(score)
+            
+        except Exception as e:
+            logger.warning(f"Pixel grid detection error: {str(e)}")
+            return 0.5
+
+    def _detect_specular_glare_enhanced(self, image: np.ndarray) -> float:
+        """
+        Detect specular highlights from glossy screens.
+        """
+        try:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            
+            bright_mask = (gray > 240).astype(np.uint8) * 255
+            
             num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
                 bright_mask, connectivity=8
             )
@@ -398,15 +519,12 @@ class AntiSpoofingService:
             
             for i in range(1, num_labels):
                 area = stats[i, cv2.CC_STAT_AREA]
-                # Small, isolated very bright blobs = potential glare
-                if 5 <= area <= (total_pixels * 0.005):  # Stricter range
-                    # Check if the blob is truly isolated
+                if 5 <= area <= (total_pixels * 0.005):
                     x = stats[i, cv2.CC_STAT_LEFT]
                     y = stats[i, cv2.CC_STAT_TOP]
                     w = stats[i, cv2.CC_STAT_WIDTH]
                     h = stats[i, cv2.CC_STAT_HEIGHT]
                     
-                    # Check surrounding area for other bright pixels
                     x1 = max(0, x - 10)
                     y1 = max(0, y - 10)
                     x2 = min(gray.shape[1], x + w + 10)
@@ -416,24 +534,22 @@ class AntiSpoofingService:
                     bright_surrounding = np.sum(surrounding > 200)
                     total_surrounding = surrounding.size
                     
-                    # True glare is isolated (surrounded by much darker area)
                     if bright_surrounding / total_surrounding < 0.3:
                         hard_glare_blobs += 1
                         hard_glare_pixels += area
             
             glare_ratio = hard_glare_pixels / total_pixels
             
-            # CALIBRATED: Much more lenient thresholds
             if hard_glare_blobs <= 3 and glare_ratio < 0.002:
-                return 0.90  # Normal skin
+                return 0.90
             elif hard_glare_blobs <= 6 and glare_ratio < 0.005:
-                return 0.75  # Slightly shiny skin
+                return 0.75
             elif hard_glare_blobs <= 10 and glare_ratio < 0.01:
-                return 0.55  # Could be glare, could be oily skin
+                return 0.55
             elif hard_glare_blobs <= 15 and glare_ratio < 0.02:
-                return 0.35  # Suspicious
+                return 0.35
             else:
-                return 0.20  # Strong glare pattern
+                return 0.20
                 
         except Exception as e:
             logger.warning(f"Glare detection error: {str(e)}")
@@ -442,33 +558,26 @@ class AntiSpoofingService:
     def _detect_screen_borders(self, image: np.ndarray) -> float:
         """
         Detect screen borders/edges in the image.
-        Background objects can create false positives.
         """
         try:
             gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
             
-            # Only check edges near the periphery (screen borders are usually at edges)
             h, w = gray.shape
-            margin = 0.15  # Check within 15% of image border
+            margin = 0.15
             
-            # Create peripheral mask
-            mask = np.zeros_like(gray)
-            mask[int(h*margin):int(h*(1-margin)), int(w*margin):int(w*(1-margin))] = 1
+            mask = np.ones_like(gray)
+            mask[int(h*margin):int(h*(1-margin)), int(w*margin):int(w*(1-margin))] = 0
             
-            # Edge detection on whole image
             edges = cv2.Canny(gray, 50, 150)
+            edges = edges * mask
             
-            # Only keep edges near borders
-            edges = edges * (1 - mask)
-            
-            # Look for straight lines
             lines = cv2.HoughLinesP(edges, 1, np.pi/180, 
                                     threshold=80, 
-                                    minLineLength=w*0.3,  # Lines must be at least 30% of width
+                                    minLineLength=int(w*0.3), 
                                     maxLineGap=20)
             
             if lines is None:
-                return 0.95  # Almost certainly real
+                return 0.95
             
             horizontal_lines = 0
             vertical_lines = 0
@@ -477,7 +586,6 @@ class AntiSpoofingService:
                 x1, y1, x2, y2 = line[0]
                 angle = np.abs(np.arctan2(y2 - y1, x2 - x1) * 180 / np.pi)
                 
-                # Check if line is near image border
                 near_border = (y1 < h*margin or y1 > h*(1-margin) or 
                              y2 < h*margin or y2 > h*(1-margin))
                 
@@ -487,17 +595,16 @@ class AntiSpoofingService:
                     elif 80 < angle < 100:
                         vertical_lines += 1
             
-            # CALIBRATED: Require multiple clear border lines
             if horizontal_lines >= 3 and vertical_lines >= 3:
-                return 0.15  # Very likely screen
+                return 0.15
             elif horizontal_lines >= 2 and vertical_lines >= 2:
-                return 0.30  # Possible screen
+                return 0.30
             elif horizontal_lines >= 2 or vertical_lines >= 2:
-                return 0.50  # Suspicious but could be background
+                return 0.50
             elif horizontal_lines >= 1 or vertical_lines >= 1:
-                return 0.75  # Probably just background
+                return 0.75
             else:
-                return 0.95  # No screen borders
+                return 0.95
                 
         except Exception as e:
             logger.warning(f"Border detection error: {str(e)}")
@@ -511,7 +618,6 @@ class AntiSpoofingService:
             gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
             gray = cv2.resize(gray, (512, 512))
             
-            # FFT analysis
             f = np.fft.fft2(gray.astype(np.float64))
             fshift = np.fft.fftshift(f)
             magnitude = np.log(np.abs(fshift) + 1)
@@ -519,7 +625,6 @@ class AntiSpoofingService:
             h, w = magnitude.shape
             cy, cx = h // 2, w // 2
             
-            # Check energy distribution in diagonal vs anti-diagonal
             y, x = np.ogrid[:h, :w]
             dist = np.sqrt((y - cy)**2 + (x - cx)**2)
             angle = np.degrees(np.arctan2(y - cy, x - cx)) % 180
@@ -527,7 +632,6 @@ class AntiSpoofingService:
             r_inner, r_outer = h//10, h//2.5
             band_mask = (dist >= r_inner) & (dist <= r_outer)
             
-            # Diagonal masks
             diag_mask = ((angle >= 30) & (angle <= 60)) | ((angle >= 120) & (angle <= 150))
             anti_diag_mask = ((angle >= 60) & (angle <= 120)) | ((angle >= 150) & (angle <= 180))
             
@@ -545,15 +649,14 @@ class AntiSpoofingService:
             else:
                 ratio = 1.0
             
-            # Halftone creates diagonal concentration
             if 0.85 < ratio < 1.15:
-                return 0.90  # Balanced - likely real
+                return 0.90
             elif 0.70 < ratio < 1.30:
-                return 0.70  # Slight imbalance
+                return 0.70
             elif 0.55 < ratio < 1.45:
-                return 0.45  # Moderate imbalance
+                return 0.45
             else:
-                return 0.20  # Strong halftone signature
+                return 0.20
                 
         except Exception as e:
             logger.warning(f"Halftone detection error: {str(e)}")
@@ -566,7 +669,6 @@ class AntiSpoofingService:
         try:
             gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
             
-            # Calculate local texture uniformity
             kernel_size = 5
             local_mean = cv2.blur(gray.astype(np.float32), (kernel_size, kernel_size))
             local_var = cv2.blur((gray.astype(np.float32) - local_mean)**2, (kernel_size, kernel_size))
@@ -574,24 +676,21 @@ class AntiSpoofingService:
             var_of_var = np.std(local_var)
             mean_var = np.mean(local_var)
             
-            # Calculate uniformity score
             if mean_var > 0:
                 uniformity = var_of_var / mean_var
             else:
                 uniformity = 0
             
-            # Paper shows high uniformity (low var_of_var relative to mean_var)
-            # But also has lower overall variance than skin
             if uniformity < 0.40 and mean_var < 10:
-                return 0.15  # Very likely paper
+                return 0.15
             elif uniformity < 0.60 and mean_var < 20:
-                return 0.35  # Possible paper
+                return 0.35
             elif uniformity < 0.80:
-                return 0.55  # Could be either
+                return 0.55
             elif uniformity < 1.10:
-                return 0.75  # Likely skin
+                return 0.75
             else:
-                return 0.90  # Natural skin texture variation
+                return 0.90
                 
         except Exception as e:
             logger.warning(f"Paper texture detection error: {str(e)}")
@@ -648,7 +747,6 @@ class AntiSpoofingService:
                 var_mean = np.mean(local_var)
                 var_std = np.std(local_var)
                 
-                # CALIBRATED: Wider acceptable range for real skin
                 if 8 < var_mean < 120 and var_std > 4:
                     scores.append(1.0)
                 elif 5 < var_mean < 150 and var_std > 2:
@@ -678,7 +776,6 @@ class AntiSpoofingService:
             
             scores = []
             
-            # CALIBRATED: More lenient ranges
             if sat_range > 100 and sat_std > 20:
                 scores.append(1.0)
             elif sat_range > 70 and sat_std > 15:
@@ -736,9 +833,11 @@ class AntiSpoofingService:
         indicators = []
         
         for r in results:
-            if r['critical'] and r['score'] < 0.3:
+            if r['critical'] and r['score'] < 0.30:
                 if r['method'] == 'screen_moire':
                     indicators.append("Moiré pattern detected (screen replay)")
+                elif r['method'] == 'pixel_grid':
+                    indicators.append("Screen pixel grid detected")
                 elif r['method'] == 'specular_glare':
                     indicators.append("Abnormal specular reflections (glass surface)")
                 elif r['method'] == 'screen_borders':
@@ -747,5 +846,18 @@ class AntiSpoofingService:
                     indicators.append("Halftone printing pattern detected")
                 elif r['method'] == 'paper_texture':
                     indicators.append("Paper texture characteristics detected")
+            elif r['critical'] and r['score'] < 0.50:
+                if r['method'] == 'screen_moire':
+                    indicators.append("Possible moiré pattern (screen replay)")
+                elif r['method'] == 'pixel_grid':
+                    indicators.append("Possible screen pixel grid")
+                elif r['method'] == 'specular_glare':
+                    indicators.append("Possible specular reflections")
+                elif r['method'] == 'screen_borders':
+                    indicators.append("Possible screen borders")
+                elif r['method'] == 'halftone_pattern':
+                    indicators.append("Possible halftone pattern")
+                elif r['method'] == 'paper_texture':
+                    indicators.append("Possible paper texture")
         
         return indicators
