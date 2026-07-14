@@ -82,67 +82,30 @@ class AntiSpoofingService:
 
         try:
             results = []
-            screen_attack_indicators = 0
-            critical_failures = 0
-            real_face_indicators = 0
 
             # ================================================================
-            # CHECK 1: MOIRE PATTERN - MOST IMPORTANT FOR SCREEN DETECTION
-            # Run this FIRST so we can block immediately (with corroboration)
+            # SIMPLIFIED POLICY (2026-07-14, fourth pass, per explicit request):
+            #   1. MOIRE PATTERN FAILS  -> immediate block, no other checks matter.
+            #   2. MOIRE PATTERN PASSES -> check the other two signals
+            #      (specular glare + screen color artifacts). Both must pass
+            #      for the face to be accepted as real.
+            # This replaces the multi-stage veto/relaxed-criteria logic, which
+            # kept getting out-voted by texture-based checks that a good
+            # screen replica can pass. Moire is now the sole gatekeeper, with
+            # glare/color as its only corroborating checks.
             # ================================================================
-            logger.info(f"[AntiSpoofingService.detect_spoofing:72] Check 1/9: MOIRE PATTERN (PRIMARY SCREEN CHECK)")
+
+            logger.info(f"[AntiSpoofingService.detect_spoofing] Check 1/3: MOIRE PATTERN")
             moire_score = self._detect_moire_pattern_balanced(image_data)
-            results.append(self._make_result('moire_pattern', moire_score, threshold=self.screen_moire_threshold))
+            moire_result = self._make_result('moire_pattern', moire_score, threshold=self.screen_moire_threshold)
+            results.append(moire_result)
 
-            if moire_score <= self.extreme_moire_veto:
-                screen_attack_indicators += 3
-                critical_failures += 2
-                logger.warning(f"[AntiSpoofingService.detect_spoofing:79] ⚠ CRITICAL: Definite screen moire! (score: {moire_score:.4f})")
-            elif moire_score <= self.strong_moire_veto:
-                screen_attack_indicators += 2
-                critical_failures += 1
-                logger.warning(f"[AntiSpoofingService.detect_spoofing:83] ⚠ STRONG screen moire pattern! (score: {moire_score:.4f})")
-            elif moire_score <= self.screen_moire_threshold:
-                screen_attack_indicators += 1
-                logger.warning(f"[AntiSpoofingService.detect_spoofing:86] ⚠ Screen moire suspected (score: {moire_score:.4f})")
-
-            # ================================================================
-            # CHECK 2: SPECULAR GLARE - Quick screen check
-            # ================================================================
-            logger.info(f"[AntiSpoofingService.detect_spoofing:91] Check 2/9: SPECULAR GLARE")
-            glare_score = self._analyze_specular_highlights_balanced(image_data)
-            results.append(self._make_result('specular_glare', glare_score))
-
-            if glare_score <= 0.25:
-                screen_attack_indicators += 1
-                logger.warning(f"[AntiSpoofingService.detect_spoofing:97] ⚠ Screen glare detected (score: {glare_score:.4f})")
-
-            # ================================================================
-            # CHECK 5 (moved up): SCREEN COLOR ARTIFACTS
-            # Needed early now so moire has a corroborating signal available
-            # before any immediate-block decision is made.
-            # ================================================================
-            logger.info(f"[AntiSpoofingService.detect_spoofing:160] Check (early): SCREEN COLOR ARTIFACTS")
-            screen_color_score = self._analyze_screen_color_artifacts(image_data)
-            results.append(self._make_result('screen_color_artifacts', screen_color_score))
-
-            # ================================================================
-            # IMMEDIATE SCREEN BLOCK CHECK
-            # Moire alone is no longer sufficient -- it must be corroborated
-            # by at least one other independent screen indicator (glare or
-            # color artifacts). This is what fixes the false-positive on
-            # real faces that trip the moire floor value alone.
-            # ================================================================
-            moire_is_extreme = moire_score <= self.extreme_moire_veto
-            corroborated = (glare_score <= self.screen_glare_block) or (screen_color_score <= self.screen_color_block)
-
-            if moire_is_extreme and corroborated:
+            if not moire_result['passed']:
                 logger.warning(
-                    f"[AntiSpoofingService.detect_spoofing:105] ⛔ IMMEDIATE BLOCK: Screen moire "
-                    f"({moire_score:.4f}) corroborated by glare={glare_score:.4f} / "
-                    f"color={screen_color_score:.4f}"
+                    f"[AntiSpoofingService.detect_spoofing] ⛔ IMMEDIATE BLOCK: "
+                    f"moire_pattern failed ({moire_score:.4f} < {self.screen_moire_threshold:.4f})"
                 )
-                logger.info(f"[AntiSpoofingService.detect_spoofing:106] ========== SCREEN ATTACK BLOCKED ==========")
+                logger.info(f"[AntiSpoofingService.detect_spoofing] ========== SCREEN ATTACK BLOCKED ==========")
 
                 return {
                     'is_real': False,
@@ -150,228 +113,42 @@ class AntiSpoofingService:
                     'threshold': self.spoofing_threshold,
                     'details': {
                         'results': results,
-                        'passed_checks': sum(1 for r in results if r['passed']),
-                        'total_checks': len(results),
+                        'passed_checks': 0,
+                        'total_checks': 1,
                         'liveness_checked': False,
-                        'screen_attack_indicators': screen_attack_indicators,
-                        'critical_failures': critical_failures,
-                        'real_face_indicators': 0,
                         'verdict': 'SPOOF',
-                        'block_reason': 'Screen moire pattern corroborated by glare/color signal'
-                    }
-                }
-            elif moire_is_extreme and not corroborated:
-                # Moire alone looked bad but nothing else agrees -- do NOT
-                # instant-block. Let it flow into the full weighted decision
-                # logic below instead of condemning on one noisy statistic.
-                logger.warning(
-                    f"[AntiSpoofingService.detect_spoofing:105b] Moire flagged extreme ({moire_score:.4f}) "
-                    f"but uncorroborated by glare={glare_score:.4f} / color={screen_color_score:.4f} "
-                    f"-- continuing to full checks instead of immediate block"
-                )
-
-            if moire_score <= 0.20 and glare_score <= self.screen_glare_block:
-                logger.warning(f"[AntiSpoofingService.detect_spoofing:122] ⛔ IMMEDIATE BLOCK: Screen confirmed by moire+glare "
-                             f"(moire: {moire_score:.4f}, glare: {glare_score:.4f})")
-                logger.info(f"[AntiSpoofingService.detect_spoofing:124] ========== SCREEN ATTACK BLOCKED ==========")
-
-                return {
-                    'is_real': False,
-                    'confidence': round((moire_score + glare_score) / 2, 4),
-                    'threshold': self.spoofing_threshold,
-                    'details': {
-                        'results': results,
-                        'passed_checks': sum(1 for r in results if r['passed']),
-                        'total_checks': len(results),
-                        'liveness_checked': False,
-                        'screen_attack_indicators': screen_attack_indicators,
-                        'critical_failures': critical_failures,
-                        'real_face_indicators': 0,
-                        'verdict': 'SPOOF',
-                        'block_reason': 'Screen confirmed by moire and glare patterns'
+                        'block_reason': 'Moire pattern check failed'
                     }
                 }
 
-            if screen_color_score <= self.screen_color_block:
-                if moire_score <= 0.25:
-                    logger.warning(f"[AntiSpoofingService.detect_spoofing:167] ⛔ IMMEDIATE BLOCK: Screen color + moire pattern")
+            logger.info(f"[AntiSpoofingService.detect_spoofing] Moire passed ({moire_score:.4f}) -- checking 2 corroborating signals")
 
-                    all_results = results.copy()
-                    return {
-                        'is_real': False,
-                        'confidence': round((moire_score + screen_color_score) / 2, 4),
-                        'threshold': self.spoofing_threshold,
-                        'details': {
-                            'results': all_results,
-                            'passed_checks': sum(1 for r in all_results if r['passed']),
-                            'total_checks': len(all_results),
-                            'liveness_checked': False,
-                            'screen_attack_indicators': screen_attack_indicators + 2,
-                            'critical_failures': critical_failures + 1,
-                            'real_face_indicators': real_face_indicators,
-                            'verdict': 'SPOOF',
-                            'block_reason': 'Screen color artifacts with moire pattern'
-                        }
-                    }
-                else:
-                    screen_attack_indicators += 2
-                    critical_failures += 1
-                    logger.warning(f"[AntiSpoofingService.detect_spoofing:186] ⚠ CRITICAL: Strong screen color artifacts!")
-            elif screen_color_score <= self.screen_color_threshold:
-                screen_attack_indicators += 1
-                logger.warning(f"[AntiSpoofingService.detect_spoofing:189] ⚠ Screen color artifacts suspected")
+            # CHECK 2: SPECULAR GLARE
+            logger.info(f"[AntiSpoofingService.detect_spoofing] Check 2/3: SPECULAR GLARE")
+            glare_score = self._analyze_specular_highlights_balanced(image_data)
+            glare_result = self._make_result('specular_glare', glare_score)
+            results.append(glare_result)
 
-            # ================================================================
-            # NOT IMMEDIATELY BLOCKED - Continue with other checks
-            # ================================================================
-            logger.info(f"[AntiSpoofingService.detect_spoofing:143] Screen not immediately confirmed, continuing checks...")
+            # CHECK 3: SCREEN COLOR ARTIFACTS
+            logger.info(f"[AntiSpoofingService.detect_spoofing] Check 3/3: SCREEN COLOR ARTIFACTS")
+            screen_color_score = self._analyze_screen_color_artifacts(image_data)
+            color_result = self._make_result('screen_color_artifacts', screen_color_score)
+            results.append(color_result)
 
-            # Check 3: Texture Analysis
-            logger.info(f"[AntiSpoofingService.detect_spoofing:146] Check 3/9: TEXTURE ANALYSIS")
-            texture_score = self._analyze_texture(image_data)
-            results.append(self._make_result('texture_analysis', texture_score))
-            if texture_score >= self.real_face_indicator_threshold:
-                real_face_indicators += 1
-
-            # Check 4: Color Distribution
-            logger.info(f"[AntiSpoofingService.detect_spoofing:153] Check 4/9: COLOR DISTRIBUTION")
-            color_score = self._analyze_color_distribution(image_data)
-            results.append(self._make_result('color_analysis', color_score))
-            if color_score >= self.real_face_indicator_threshold:
-                real_face_indicators += 1
-
-            # Check 6: Edge Analysis
-            logger.info(f"[AntiSpoofingService.detect_spoofing:193] Check 6/9: EDGE ANALYSIS")
-            edge_score = self._analyze_edges(image_data)
-            results.append(self._make_result('edge_analysis', edge_score))
-            if edge_score >= self.real_face_indicator_threshold:
-                real_face_indicators += 1
-
-            # Check 7: Noise Pattern
-            logger.info(f"[AntiSpoofingService.detect_spoofing:200] Check 7/9: NOISE PATTERN")
-            noise_score = self._analyze_noise_pattern(image_data)
-            results.append(self._make_result('noise_analysis', noise_score, threshold=0.40))
-            if noise_score >= self.real_face_indicator_threshold:
-                real_face_indicators += 1
-
-            # Check 8: LBP Texture
-            logger.info(f"[AntiSpoofingService.detect_spoofing:207] Check 8/9: LBP TEXTURE")
-            lbp_score = self._analyze_texture_lbp(image_data)
-            results.append(self._make_result('lbp_texture', lbp_score))
-            if lbp_score >= self.real_face_indicator_threshold:
-                real_face_indicators += 1
-
-            # Check 9: Motion Liveness (optional)
-            liveness_checked = False
-            if motion_frames and len(motion_frames) >= 2:
-                logger.info(f"[AntiSpoofingService.detect_spoofing:216] Check 9/9: MOTION LIVENESS")
-                liveness_score = self._analyze_motion_liveness(motion_frames)
-                results.append(self._make_result('motion_liveness', liveness_score))
-                liveness_checked = True
-
-                if liveness_score <= 0.20:
-                    screen_attack_indicators += 2
-                    critical_failures += 1
-                    logger.warning(f"[AntiSpoofingService.detect_spoofing:224] ⚠ Static/rigid motion detected")
-            else:
-                logger.info(f"[AntiSpoofingService.detect_spoofing:226] ⊘ Motion liveness SKIPPED")
-
-            # Calculate results
             passed_count = sum(1 for r in results if r['passed'])
             total_checks = len(results)
             overall_score = sum(r['score'] for r in results) / total_checks
 
-            logger.info(f"[AntiSpoofingService.detect_spoofing:233] ========== RESULTS SUMMARY ==========")
-            logger.info(f"[AntiSpoofingService.detect_spoofing:234]   Total checks: {total_checks}")
-            logger.info(f"[AntiSpoofingService.detect_spoofing:235]   Passed: {passed_count}")
-            logger.info(f"[AntiSpoofingService.detect_spoofing:236]   Overall score: {overall_score:.4f}")
-            logger.info(f"[AntiSpoofingService.detect_spoofing:237]   Screen indicators: {screen_attack_indicators}")
-            logger.info(f"[AntiSpoofingService.detect_spoofing:238]   Critical failures: {critical_failures}")
-            logger.info(f"[AntiSpoofingService.detect_spoofing:239]   Real face indicators: {real_face_indicators}")
+            # Both corroborating checks must pass for the face to be accepted.
+            is_real = glare_result['passed'] and color_result['passed']
 
+            logger.info(f"[AntiSpoofingService.detect_spoofing] ========== RESULTS SUMMARY ==========")
+            logger.info(f"[AntiSpoofingService.detect_spoofing]   Total checks: {total_checks}")
+            logger.info(f"[AntiSpoofingService.detect_spoofing]   Passed: {passed_count}")
+            logger.info(f"[AntiSpoofingService.detect_spoofing]   Overall score: {overall_score:.4f}")
             for r in results:
                 status = "✓ PASS" if r['passed'] else "✗ FAIL"
-                logger.info(f"[AntiSpoofingService.detect_spoofing:242]   {r['method']}: {r['score']:.4f} {status}")
-
-            # ================================================================
-            # DECISION LOGIC (only reached if not immediately blocked)
-            # ================================================================
-
-            is_strong_real_face = (
-                real_face_indicators >= self.real_face_min_indicators and
-                overall_score >= self.real_face_min_score
-            )
-
-            logger.info(f"[AntiSpoofingService.detect_spoofing:254] DECISION PHASE:")
-            logger.info(f"[AntiSpoofingService.detect_spoofing:255]   Strong real face: {is_strong_real_face}")
-
-            is_real = True
-
-            if is_strong_real_face:
-                logger.info(f"[AntiSpoofingService.detect_spoofing:260] Using RELAXED criteria for strong real face")
-
-                # FIX (2026-07-14, third pass): texture/edge/noise/LBP checks can
-                # all pass on a good-quality screen replica, earning enough
-                # "real_face_indicators" to hit this relaxed branch. Previously
-                # that branch only rejected if critical_failures >= 3, which let
-                # a single corroborated moire failure (moire FAIL + screen
-                # indicators from glare/color) get overridden and accepted as
-                # REAL. Moire+corroboration is specifically the signal meant to
-                # catch screens that otherwise look textured enough to pass --
-                # it must not be out-voted by the very checks it exists to
-                # override.
-                if critical_failures >= 3 and moire_score <= 0.03:
-                    logger.warning(f"[AntiSpoofingService.detect_spoofing:263] ⚔ VETO: Critical failures with extreme moire")
-                    is_real = False
-                elif critical_failures >= 1 or screen_attack_indicators >= 2:
-                    logger.warning(
-                        f"[AntiSpoofingService.detect_spoofing:263b] ⚔ VETO: Moire failed and corroborated "
-                        f"(critical_failures={critical_failures}, screen_attack_indicators={screen_attack_indicators}) "
-                        f"-- texture-based real-face indicators cannot override this"
-                    )
-                    is_real = False
-                else:
-                    logger.info(f"[AntiSpoofingService.detect_spoofing:266] ✓ Real face ACCEPTED")
-                    is_real = True
-            else:
-                logger.info(f"[AntiSpoofingService.detect_spoofing:269] Using STANDARD strict criteria")
-
-                if critical_failures >= 1:
-                    logger.warning(f"[AntiSpoofingService.detect_spoofing:272] ⚔ VETO 1: Critical failure")
-                    is_real = False
-
-                if screen_attack_indicators >= 3:
-                    logger.warning(f"[AntiSpoofingService.detect_spoofing:276] ⚔ VETO 2: Multiple screen indicators")
-                    is_real = False
-
-                if screen_attack_indicators >= 1 and overall_score < self.low_confidence_threshold:
-                    logger.warning(f"[AntiSpoofingService.detect_spoofing:280] ⚔ VETO 3: Screen indicator + low confidence")
-                    is_real = False
-
-                if moire_score <= self.strong_moire_veto:
-                    logger.warning(f"[AntiSpoofingService.detect_spoofing:284] ⚔ VETO 4: Strong moire")
-                    is_real = False
-
-                if moire_score <= 0.30:
-                    other_failures = [r for r in results if r['method'] != 'moire_pattern' and r['score'] <= 0.40]
-                    if len(other_failures) >= 1:
-                        logger.warning(f"[AntiSpoofingService.detect_spoofing:290] ⚔ VETO 5: Moire + other failures")
-                        is_real = False
-
-                if overall_score < 0.55:
-                    logger.warning(f"[AntiSpoofingService.detect_spoofing:294] ⚔ VETO 6: Very low confidence")
-                    is_real = False
-
-                if passed_count < total_checks - 1:
-                    logger.warning(f"[AntiSpoofingService.detect_spoofing:298] ⚔ VETO 7: Multiple failures")
-                    is_real = False
-
-            if is_real:
-                majority_needed = max(self.min_checks_required, (total_checks // 2) + 1)
-                is_real = (
-                    (overall_score >= self.spoofing_threshold and passed_count >= majority_needed)
-                    or overall_score >= 0.78
-                )
+                logger.info(f"[AntiSpoofingService.detect_spoofing]   {r['method']}: {r['score']:.4f} {status}")
 
             result = {
                 'is_real': is_real,
@@ -381,16 +158,13 @@ class AntiSpoofingService:
                     'results': results,
                     'passed_checks': passed_count,
                     'total_checks': total_checks,
-                    'liveness_checked': liveness_checked,
-                    'screen_attack_indicators': screen_attack_indicators,
-                    'critical_failures': critical_failures,
-                    'real_face_indicators': real_face_indicators,
+                    'liveness_checked': False,
                     'verdict': 'REAL' if is_real else 'SPOOF'
                 }
             }
 
-            logger.info(f"[AntiSpoofingService.detect_spoofing:325] ========== FINAL VERDICT: {result['details']['verdict']} ==========")
-            logger.info(f"[AntiSpoofingService.detect_spoofing:326] ========== DETECTION COMPLETE ==========")
+            logger.info(f"[AntiSpoofingService.detect_spoofing] ========== FINAL VERDICT: {result['details']['verdict']} ==========")
+            logger.info(f"[AntiSpoofingService.detect_spoofing] ========== DETECTION COMPLETE ==========")
 
             return result
 
