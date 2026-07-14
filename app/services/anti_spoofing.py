@@ -44,8 +44,8 @@ class AntiSpoofingService:
         self.spoofing_threshold = 0.60
 
         # Per-category weighted-average thresholds
-        self.screen_category_threshold = 0.55
-        self.print_category_threshold = 0.55
+        self.screen_category_threshold = 0.60
+        self.print_category_threshold = 0.60
 
         # Hard floor: ANY single check below this value is treated as a
         # strong, unambiguous spoof signal and vetoes the verdict, no
@@ -61,7 +61,7 @@ class AntiSpoofingService:
         self.screen_color_threshold = 0.40
         self.print_texture_threshold = 0.50
         self.print_edge_threshold = 0.50
-        self.print_reflectance_threshold = 0.50
+        self.print_reflectance_threshold = 0.60
 
         # Within-category weights (must each sum to 1.0)
         self.screen_weights = {
@@ -384,7 +384,7 @@ class AntiSpoofingService:
                 elif bright_fraction > 0.10 or large_blob_fraction > 0.05:
                     scores.append(0.35)
                 elif bright_fraction > 0.05 or large_blob_fraction > 0.02:
-                    scores.append(0.55)
+                    scores.append(0.60)
                 elif bright_fraction > 0.02 or large_blob_fraction > 0.01:
                     scores.append(0.75)
                 else:
@@ -492,7 +492,7 @@ class AntiSpoofingService:
                 return 0.95
             elif laplacian_var > 150 and normalized_entropy > 0.65:
                 return 0.80
-            elif laplacian_var > 80 and normalized_entropy > 0.55:
+            elif laplacian_var > 80 and normalized_entropy > 0.60:
                 return 0.60
             elif laplacian_var > 40 and normalized_entropy > 0.45:
                 return 0.40
@@ -617,7 +617,7 @@ class AntiSpoofingService:
                 if rigidity_ratio < 0.15:
                     return 0.30
                 elif rigidity_ratio < 0.30:
-                    return 0.55
+                    return 0.60
                 elif rigidity_ratio < 0.50:
                     return 0.75
                 else:
