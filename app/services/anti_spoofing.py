@@ -53,9 +53,9 @@ class AntiSpoofingService:
 
         # Real face validation
         self.real_face_min_indicators = 3
-        self.real_face_min_score = 0.68
+        self.real_face_min_score = 0.60
         self.real_face_indicator_threshold = 0.85
-        self.low_confidence_threshold = 0.65
+        self.low_confidence_threshold = 0.60
 
         logger.info(f"[AntiSpoofingService.__init__:38] IMMEDIATE BLOCK Thresholds:")
         logger.info(f"[AntiSpoofingService.__init__:39]   moire_block: {self.screen_moire_block}")
