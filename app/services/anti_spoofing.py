@@ -66,7 +66,7 @@ class AntiSpoofingService:
         # Within-category weights (must each sum to 1.0)
         self.screen_weights = {
             'moire_pattern': 0.45,
-            'specular_glare': 0.30,
+            'specular_glare': 0.20,
             'screen_color_artifacts': 0.25,
         }
         self.print_weights = {
