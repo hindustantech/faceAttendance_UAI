@@ -148,3 +148,184 @@ class CloudinaryService:
         except Exception as e:
             logger.error(f"Failed to get image info: {str(e)}")
             return None
+    async def delete_face_image(
+        self,
+        employee_id: str,
+        company_id: str,
+        cloudinary_public_id: str
+    ) -> Dict:
+        """
+        Delete a single training image — removes it from Cloudinary
+        AND from the face profile's images array in MongoDB.
+        """
+        try:
+            collection = self.db['faces']
+
+            face_doc = await collection.find_one({
+                'employeeId': ObjectId(employee_id),
+                'companyId': ObjectId(company_id)
+            })
+
+            if not face_doc:
+                return {
+                    'success': False,
+                    'message': 'Face profile not found',
+                    'error_code': 'PROFILE_NOT_FOUND'
+                }
+
+            # Confirm the image actually belongs to this profile
+            image_exists = any(
+                img.get('cloudinaryPublicId') == cloudinary_public_id
+                for img in face_doc.get('images', [])
+            )
+
+            if not image_exists:
+                return {
+                    'success': False,
+                    'message': 'Image not found in this profile',
+                    'error_code': 'IMAGE_NOT_FOUND'
+                }
+
+            # Step 1: Delete from Cloudinary first
+            deleted_from_cloudinary = await self.cloudinary.delete_image(cloudinary_public_id)
+
+            if not deleted_from_cloudinary:
+                logger.warning(
+                    f"Cloudinary deletion failed for {cloudinary_public_id}, "
+                    f"proceeding with DB removal anyway"
+                )
+
+            # Step 2: Remove the image entry from MongoDB
+            result = await collection.update_one(
+                {
+                    'employeeId': ObjectId(employee_id),
+                    'companyId': ObjectId(company_id)
+                },
+                {
+                    '$pull': {'images': {'cloudinaryPublicId': cloudinary_public_id}},
+                    '$set': {'updatedAt': datetime.utcnow()}
+                }
+            )
+
+            # Step 3: Re-check enrollment status since image count changed
+            updated_doc = await collection.find_one({
+                'employeeId': ObjectId(employee_id),
+                'companyId': ObjectId(company_id)
+            })
+            active_images = [img for img in updated_doc.get('images', []) if img.get('isActive')]
+            min_required = updated_doc.get('minRequiredImages', settings.MIN_TRAINING_IMAGES)
+
+            if len(active_images) < min_required and updated_doc.get('isEnrolled'):
+                await collection.update_one(
+                    {'_id': updated_doc['_id']},
+                    {
+                        '$set': {
+                            'isEnrolled': False,
+                            'enrollmentStatus': 'needs_reenrollment'
+                        }
+                    }
+                )
+                await self._notify_backend(employee_id, company_id, 'enrollment_downgraded')
+
+            # Step 4: Invalidate recognition cache — stale embedding must not be matched against
+            from app.services.face_recognition import FaceRecognitionService
+            recognition_service = FaceRecognitionService()
+            await recognition_service.initialize()
+            await recognition_service.invalidate_cache(company_id)
+
+            # Step 5: Notify Node.js backend
+            await self._notify_backend(employee_id, company_id, 'training_image_deleted')
+
+            return {
+                'success': True,
+                'message': 'Training image deleted successfully',
+                'data': {
+                    'cloudinary_deleted': deleted_from_cloudinary,
+                    'remaining_active_images': len(active_images)
+                }
+            }
+
+        except Exception as e:
+            logger.error(f"Failed to delete face image: {str(e)}", exc_info=True)
+            return {
+                'success': False,
+                'message': f'Deletion failed: {str(e)}',
+                'error_code': 'DELETE_ERROR'
+            }
+
+    async def delete_all_training_data(
+        self,
+        employee_id: str,
+        company_id: str
+    ) -> Dict:
+        """
+        Delete ALL training data for an employee — every Cloudinary image
+        plus the entire face profile document. Use for full re-enrollment
+        or offboarding (data retention / consent withdrawal).
+        """
+        try:
+            collection = self.db['faces']
+
+            face_doc = await collection.find_one({
+                'employeeId': ObjectId(employee_id),
+                'companyId': ObjectId(company_id)
+            })
+
+            if not face_doc:
+                return {
+                    'success': False,
+                    'message': 'Face profile not found',
+                    'error_code': 'PROFILE_NOT_FOUND'
+                }
+
+            images = face_doc.get('images', [])
+
+            # Step 1: Delete every image from Cloudinary
+            deleted_count = 0
+            failed_deletions = []
+
+            for img in images:
+                public_id = img.get('cloudinaryPublicId')
+                if not public_id:
+                    continue
+                success = await self.cloudinary.delete_image(public_id)
+                if success:
+                    deleted_count += 1
+                else:
+                    failed_deletions.append(public_id)
+
+            # Step 2: Delete the whole profile document from MongoDB
+            await collection.delete_one({'_id': face_doc['_id']})
+
+            # Step 3: Invalidate recognition cache
+            from app.services.face_recognition import FaceRecognitionService
+            recognition_service = FaceRecognitionService()
+            await recognition_service.initialize()
+            await recognition_service.invalidate_cache(company_id)
+
+            # Step 4: Notify Node.js backend
+            await self._notify_backend(employee_id, company_id, 'training_data_deleted')
+
+            if failed_deletions:
+                logger.warning(
+                    f"Some Cloudinary images failed to delete for employee {employee_id}: "
+                    f"{failed_deletions}"
+                )
+
+            return {
+                'success': True,
+                'message': 'All training data deleted successfully',
+                'data': {
+                    'images_deleted_from_cloudinary': deleted_count,
+                    'total_images': len(images),
+                    'failed_cloudinary_deletions': failed_deletions
+                }
+            }
+
+        except Exception as e:
+            logger.error(f"Failed to delete all training data: {str(e)}", exc_info=True)
+            return {
+                'success': False,
+                'message': f'Deletion failed: {str(e)}',
+                'error_code': 'DELETE_ERROR'
+            }
