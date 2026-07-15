@@ -13,6 +13,7 @@ from app.utils.logger import setup_logger
 
 logger = setup_logger(__name__)
 
+
 class FaceTrainingService:
     """
     Face Training Service
@@ -153,7 +154,7 @@ class FaceTrainingService:
                     }
 
                 # Add new image
-                result = await collection.update_one(
+                await collection.update_one(
                     {
                         'employeeId': ObjectId(employee_id),
                         'companyId': ObjectId(company_id)
@@ -180,7 +181,7 @@ class FaceTrainingService:
                     'updatedAt': datetime.utcnow()
                 }
 
-                result = await collection.insert_one(face_profile)
+                await collection.insert_one(face_profile)
 
             # Step 6: Check enrollment status
             await self._check_enrollment_status(employee_id, company_id)
